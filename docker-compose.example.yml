@@ -1,25 +1,24 @@
-# Copy to docker-compose.yml and fill in. Secrets can also live in
-# ./config/proposarr.yaml instead of the environment.
+# Copy to docker-compose.yml. Only the port and the volume are needed:
+# open http://<host>:8585 and enter Radarr, Sonarr, Plex, TMDB and Claude in
+# the web UI. Environment variables below are optional; a variable that is set
+# locks that field in the UI.
 services:
   proposarr:
     image: leander1999/proposarr:latest
     container_name: proposarr
     restart: unless-stopped
-    # uid:gid that owns ./config on the host (default image user is 1000:1000)
-    user: "1000:1000"
+    ports:
+      - "8585:8585"
     volumes:
       - ./config:/config
     environment:
       TZ: Etc/UTC
-      # From `claude setup-token`. Or set ANTHROPIC_API_KEY instead, never both.
-      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
-      PROPOSARR_TMDB_API_KEY: ${PROPOSARR_TMDB_API_KEY}
-      # Any address the container can reach: a service name on the same
-      # Docker network (http://radarr:7878) or a LAN address.
-      PROPOSARR_RADARR_URL: http://radarr:7878
-      PROPOSARR_RADARR_API_KEY: ${PROPOSARR_RADARR_API_KEY}
-      PROPOSARR_SONARR_URL: http://sonarr:8989
-      PROPOSARR_SONARR_API_KEY: ${PROPOSARR_SONARR_API_KEY}
-      # Optional watch history: Plex or Jellyfin
-      PROPOSARR_PLEX_URL: http://plex:32400
-      PROPOSARR_PLEX_TOKEN: ${PROPOSARR_PLEX_TOKEN}
+      # Owner of ./config on the host (Unraid: 99 and 100).
+      PUID: "1000"
+      PGID: "1000"
+      # Optional overrides, normally entered in the web UI instead:
+      # CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN}
+      # PROPOSARR_RADARR_URL: http://radarr:7878
+      # PROPOSARR_SONARR_URL: http://sonarr:8989
+      # PROPOSARR_WEB_USERNAME: admin
+      # PROPOSARR_WEB_PASSWORD: change-me

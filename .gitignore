@@ -5,11 +5,13 @@ docs/PLAN.md
 /proposarr
 /bin/
 /dist/
-proposarr.yaml
+proposarr.yaml*
 .env
 *.env
 coverage.out
 .DS_Store
+.idea/
+.vscode/
 web/node_modules/
 web/dist/*
 !web/dist/.gitkeep

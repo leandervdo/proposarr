@@ -66,7 +66,7 @@ func TestDefault(t *testing.T) {
 	if c.Claude.Bin != "claude" || c.Claude.Timeout.Duration != 10*time.Minute {
 		t.Errorf("unexpected claude defaults: %+v", c.Claude)
 	}
-	want := KindSettings{Model: "claude-sonnet-5", Effort: "medium", Picks: 10, Candidates: 150, FreePicks: 3, Seeds: 15, TopTitles: 40}
+	want := KindSettings{Model: "claude-sonnet-5", Effort: "medium", Picks: 10, Candidates: 150, FreePicks: 3, Seeds: 15, TopTitles: 500}
 	if c.Movies != want || c.Series != want {
 		t.Errorf("kind defaults: movies=%+v series=%+v", c.Movies, c.Series)
 	}

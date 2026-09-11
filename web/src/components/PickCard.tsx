@@ -1,0 +1,188 @@
+import { Check, Clock, EyeOff, Plus, RotateCcw, Tv } from "lucide-react";
+import { useState } from "react";
+import { toast } from "sonner";
+import { useSetVerdict } from "@/api/queries";
+import type { Pick, Verdict } from "@/api/types";
+import { appFor, appName, shortDate } from "@/lib/format";
+import { cn } from "@/lib/utils";
+import { Poster } from "./Poster";
+import { Button } from "./ui/button";
+
+interface PickCardProps {
+  pick: Pick;
+  onAccept: (pick: Pick) => void;
+}
+
+export function PickCard({ pick, onAccept }: PickCardProps) {
+  const [revealed, setRevealed] = useState(false);
+  const setVerdict = useSetVerdict();
+  const app = appName(appFor(pick.kind));
+  const added = pick.request?.status === "added";
+
+  const decide = (verdict: Verdict | "") => {
+    const previous = pick.verdict ?? "";
+    setVerdict.mutate(
+      { pick, verdict },
+      {
+        onSuccess: () => {
+          const label = verdict === "later" ? "Saved for later" : verdict === "ignored" ? "Ignored" : "Moved back to undecided";
+          toast(label, {
+            description: pick.title,
+            action: { label: "Undo", onClick: () => setVerdict.mutate({ pick: { ...pick, verdict: verdict || undefined }, verdict: previous }) },
+          });
+        },
+        onError: (err) => toast.error(`Could not update ${pick.title}`, { description: err.message }),
+      },
+    );
+  };
+
+  return (
+    <article
+      aria-label={`${pick.title}${pick.year ? ` (${pick.year})` : ""}, score ${pick.score}`}
+      className="group/card relative flex flex-col"
+    >
+      <div
+        className="relative"
+        onPointerUp={(e) => {
+          if (e.pointerType === "touch" && !(e.target as HTMLElement).closest("button")) setRevealed((r) => !r);
+        }}
+      >
+        <Poster
+          src={pick.poster_url}
+          title={pick.title}
+          className={cn(
+            "transition-[filter,opacity] duration-300",
+            pick.verdict === "ignored" && "opacity-55 grayscale",
+          )}
+        />
+
+        <ScoreBadge score={pick.score} />
+        {pick.source === "free" && (
+          <span className="absolute top-2.5 right-2.5 rounded-full bg-black/55 px-2 py-0.5 text-[11px] font-medium text-white/90 backdrop-blur-md">
+            Outside the list
+          </span>
+        )}
+
+        {/* State strip, always visible */}
+        {(added || pick.verdict) && !revealed && (
+          <div className="scrim-bottom absolute inset-x-0 bottom-0 flex items-end rounded-b-[var(--radius-poster)] px-3 pt-10 pb-2.5 text-[13px] text-white transition-opacity group-focus-within/card:opacity-0 group-hover/card:opacity-0">
+            <VerdictLine pick={pick} app={app} />
+          </div>
+        )}
+
+        {/* Details and actions: hover or focus on desktop, tap on touch */}
+        <div
+          className={cn(
+            "absolute inset-0 flex flex-col justify-end rounded-[var(--radius-poster)] bg-[rgb(var(--scrim)/0.88)] p-3 text-white opacity-0 backdrop-blur-[2px] transition-opacity duration-200",
+            "group-focus-within/card:opacity-100 [@media(hover:hover)]:group-hover/card:opacity-100",
+            revealed ? "opacity-100" : "pointer-events-none group-focus-within/card:pointer-events-auto [@media(hover:hover)]:group-hover/card:pointer-events-auto",
+          )}
+        >
+          {pick.overview && <p className="line-clamp-[8] min-h-0 overflow-hidden text-[13px] leading-snug text-white/85">{pick.overview}</p>}
+          {pick.genres && pick.genres.length > 0 && <p className="mt-2 line-clamp-1 text-xs text-white/60">{pick.genres.join(", ")}</p>}
+          <p className="mt-1 flex items-center gap-1.5 text-xs text-white/80">
+            <Tv className="size-3.5 shrink-0" />
+            <span className="line-clamp-1">{pick.streaming && pick.streaming.length > 0 ? `Streams on ${pick.streaming.join(", ")}` : "Not on a streaming service here"}</span>
+          </p>
+
+          <div className="mt-3 flex items-center gap-1.5">
+            {added ? (
+              <p className="flex h-8 flex-1 items-center gap-1.5 text-[13px] font-medium text-white">
+                <Check className="size-4 text-[#7fd6bc]" /> In {app}
+              </p>
+            ) : (
+              <Button variant="primary" size="sm" className="flex-1" onClick={() => onAccept(pick)}>
+                <Plus /> Add
+              </Button>
+            )}
+            {!added && pick.verdict !== "later" && (
+              <Button variant="onPoster" size="iconSm" aria-label={`Save ${pick.title} for later`} title="Later" onClick={() => decide("later")}>
+                <Clock />
+              </Button>
+            )}
+            {!added && pick.verdict !== "ignored" && (
+              <Button variant="onPoster" size="iconSm" aria-label={`Ignore ${pick.title}`} title="Ignore" onClick={() => decide("ignored")}>
+                <EyeOff />
+              </Button>
+            )}
+            {!added && (pick.verdict === "later" || pick.verdict === "ignored") && (
+              <Button variant="onPoster" size="iconSm" aria-label={`Move ${pick.title} back to undecided`} title="Move back" onClick={() => decide("")}>
+                <RotateCcw />
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 flex min-w-0 flex-col gap-1.5 px-0.5">
+        <h3 className="text-[15px] leading-tight font-semibold">
+          <span className="line-clamp-1">{pick.title}</span>
+          {pick.year && <span className="nums text-[13px] font-normal text-text-muted">{pick.year}</span>}
+        </h3>
+        <p className="line-clamp-2 text-[13px] leading-snug text-text-muted">{pick.reason}</p>
+        {pick.related_to && pick.related_to.length > 0 && (
+          <ul className="mt-0.5 flex flex-wrap gap-1" aria-label="Related to your library">
+            {pick.related_to.map((t) => (
+              <li key={t} className="max-w-full truncate rounded-full border border-border px-2 py-0.5 text-[11px] text-text-muted">
+                {t.replace(/\s\(\d{4}\)$/, "")}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function ScoreBadge({ score }: { score: number }) {
+  const high = score >= 90;
+  return (
+    <div
+      className={cn(
+        "absolute top-2.5 left-2.5 flex h-9 min-w-9 items-center justify-center rounded-[7px] px-1.5 font-display text-[22px] leading-none font-bold backdrop-blur-md",
+        high ? "bg-accent text-accent-contrast" : "bg-black/60 text-white",
+      )}
+      title={`Score ${score} of 100`}
+    >
+      <span className="nums">{score}</span>
+    </div>
+  );
+}
+
+function VerdictLine({ pick, app }: { pick: Pick; app: string }) {
+  if (pick.request?.status === "added") {
+    return (
+      <span className="flex min-w-0 items-center gap-1.5">
+        <Check className="size-3.5 shrink-0 text-[#7fd6bc]" />
+        <span className="truncate">
+          Added · {pick.request.quality_profile}
+        </span>
+        <span className="sr-only">to {app}</span>
+      </span>
+    );
+  }
+  if (pick.verdict === "later") {
+    const until = shortDate(pick.later_until);
+    return (
+      <span className="flex items-center gap-1.5">
+        <Clock className="size-3.5 shrink-0" />
+        {until ? `Later, back on ${until}` : "Saved for later"}
+      </span>
+    );
+  }
+  if (pick.verdict === "ignored") {
+    return (
+      <span className="flex items-center gap-1.5">
+        <EyeOff className="size-3.5 shrink-0" /> Ignored
+      </span>
+    );
+  }
+  if (pick.verdict === "accepted") {
+    return (
+      <span className="flex items-center gap-1.5">
+        <Check className="size-3.5 shrink-0" /> Accepted, not added yet
+      </span>
+    );
+  }
+  return null;
+}

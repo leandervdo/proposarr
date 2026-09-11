@@ -57,7 +57,7 @@ movies:
   candidates: 150      # candidate list cap sent to the model
   free_picks: 3        # picks allowed outside the candidate list
   seeds: 15            # profile titles used to fetch TMDB recommendations
-  top_titles: 40       # profile titles shown to the model
+  top_titles: 500      # library titles shown to the model, watched first (5-1000)
 
 series:
   model: claude-sonnet-5
@@ -66,4 +66,4 @@ series:
   candidates: 150
   free_picks: 3
   seeds: 15
-  top_titles: 40
+  top_titles: 500

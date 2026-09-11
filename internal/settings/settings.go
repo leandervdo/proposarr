@@ -102,7 +102,7 @@ func buildFields() []field {
 			{key: name + ".candidates", env: env + "CANDIDATES", typ: typeInt, min: 10, max: 500, num: func(c *config.Config) *int { return &get(c).Candidates }},
 			{key: name + ".free_picks", env: env + "FREE_PICKS", typ: typeInt, min: 0, max: 10, num: func(c *config.Config) *int { return &get(c).FreePicks }},
 			{key: name + ".seeds", env: env + "SEEDS", typ: typeInt, min: 1, max: 50, num: func(c *config.Config) *int { return &get(c).Seeds }},
-			{key: name + ".top_titles", env: env + "TOP_TITLES", typ: typeInt, min: 5, max: 200, num: func(c *config.Config) *int { return &get(c).TopTitles }},
+			{key: name + ".top_titles", env: env + "TOP_TITLES", typ: typeInt, min: 5, max: 1000, num: func(c *config.Config) *int { return &get(c).TopTitles }},
 		}
 	}
 

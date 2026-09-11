@@ -149,7 +149,7 @@ func withDefaults(r Request) Request {
 		r.Seeds = 15
 	}
 	if r.TopTitles <= 0 {
-		r.TopTitles = 40
+		r.TopTitles = 500
 	}
 	if r.HistoryDays <= 0 {
 		r.HistoryDays = 180

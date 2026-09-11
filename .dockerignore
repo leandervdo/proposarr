@@ -10,3 +10,5 @@ proposarr.yaml
 .env
 *.env
 coverage.out
+web/node_modules
+web/dist

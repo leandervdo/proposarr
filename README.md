@@ -87,7 +87,7 @@ The listen address, data directory, `claude` binary path and web login can only 
 | `PROPOSARR_MOVIES_CANDIDATES`, `PROPOSARR_SERIES_CANDIDATES` | `150` | Candidate list cap |
 | `PROPOSARR_MOVIES_FREE_PICKS`, `PROPOSARR_SERIES_FREE_PICKS` | `3` | Picks allowed outside the candidate list |
 | `PROPOSARR_MOVIES_SEEDS`, `PROPOSARR_SERIES_SEEDS` | `15` | Profile titles used to fetch recommendations |
-| `PROPOSARR_MOVIES_TOP_TITLES`, `PROPOSARR_SERIES_TOP_TITLES` | `40` | Profile titles shown to the model |
+| `PROPOSARR_MOVIES_TOP_TITLES`, `PROPOSARR_SERIES_TOP_TITLES` | `500` | Library titles shown to the model, watched titles first; libraries up to this size are sent in full (5–1000) |
 
 **Sonarr/Radarr API key fallback.** When the API key is left empty, Proposarr reads it from the app's `/initialize.json`, the file its web UI loads. That only works while Sonarr/Radarr do not require a login from Proposarr's address (Settings → General → Authentication Required → Disabled for Local Addresses), and it is not an official API. A configured key always wins; set one if you enable authentication.
 

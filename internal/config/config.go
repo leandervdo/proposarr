@@ -123,7 +123,7 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 }
 
 func defaultKind() KindSettings {
-	return KindSettings{Model: "claude-sonnet-5", Effort: "medium", Picks: 10, Candidates: 150, FreePicks: 3, Seeds: 15, TopTitles: 40}
+	return KindSettings{Model: "claude-sonnet-5", Effort: "medium", Picks: 10, Candidates: 150, FreePicks: 3, Seeds: 15, TopTitles: 500}
 }
 
 // Default returns the settings used when nothing is configured.

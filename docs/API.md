@@ -104,7 +104,7 @@ Editable keys:
 | `movies.candidates`, `series.candidates` | integer 10–500 |
 | `movies.free_picks`, `series.free_picks` | integer 0–10 |
 | `movies.seeds`, `series.seeds` | integer 1–50 |
-| `movies.top_titles`, `series.top_titles` | integer 5–200 |
+| `movies.top_titles`, `series.top_titles` | integer 5–1000 |
 
 `listen`, `data_dir`, `claude.bin` and the web login (`PROPOSARR_WEB_USERNAME` / `PROPOSARR_WEB_PASSWORD`) stay file/environment only and are shown read-only.
 
