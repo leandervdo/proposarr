@@ -108,9 +108,11 @@ func TestRadarrLookup(t *testing.T) {
 		"GET /api/v3/movie/lookup/tmdb": func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Query().Get("tmdbId") {
 			case "10":
-				io.WriteString(w, `{"title":"New","year":2021,"tmdbId":10,"titleSlug":"new-10"}`)
+				io.WriteString(w, `{"title":"New","year":2021,"tmdbId":10,"titleSlug":"new-10","ratings":{"imdb":{"votes":2275363,"value":8.7,"type":"user"},
+					"tmdb":{"votes":36000,"value":8.4,"type":"user"},"metacritic":{"votes":0,"value":73,"type":"user"},
+					"rottenTomatoes":{"votes":0,"value":83,"type":"user"},"trakt":{"votes":80000,"value":8.5,"type":"user"}}}`)
 			case "11":
-				io.WriteString(w, `{"id":42,"title":"Owned","year":2019,"tmdbId":11}`)
+				io.WriteString(w, `{"id":42,"title":"Owned","year":2019,"tmdbId":11,"ratings":{"imdb":{"votes":0,"value":0},"metacritic":{"votes":0,"value":0},"rottenTomatoes":{"votes":0,"value":0}}}`)
 			default:
 				http.NotFound(w, r)
 			}
@@ -126,7 +128,10 @@ func TestRadarrLookup(t *testing.T) {
 	if l.LibraryID != 0 || l.Title != "New" || l.Raw["titleSlug"] != "new-10" {
 		t.Fatalf("lookup = %+v", l)
 	}
-	if l, err = r.Lookup(ctx, 11); err != nil || l.LibraryID != 42 {
+	if want := (Ratings{IMDB: 8.7, IMDBVotes: 2275363, RottenTomatoes: 83, Metacritic: 73}); l.Ratings != want {
+		t.Errorf("ratings = %+v, want %+v", l.Ratings, want)
+	}
+	if l, err = r.Lookup(ctx, 11); err != nil || l.LibraryID != 42 || l.Ratings != (Ratings{}) {
 		t.Fatalf("in-library lookup = %+v, %v", l, err)
 	}
 	if _, err = r.Lookup(ctx, 99); err == nil || !strings.Contains(err.Error(), "not found") {
@@ -139,7 +144,9 @@ func TestSonarrLookupPicksMatchingTVDB(t *testing.T) {
 		"GET /api/v3/series/lookup": func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Query().Get("term") {
 			case "tvdb:200":
-				io.WriteString(w, `[{"title":"Other","tvdbId":100},{"id":7,"title":"Match","year":2020,"tvdbId":200,"tmdbId":55,"seasons":[{"seasonNumber":1}]}]`)
+				io.WriteString(w, `[{"title":"Other","tvdbId":100,"ratings":{"votes":5,"value":1.0}},{"id":7,"title":"Match","year":2020,"tvdbId":200,"tmdbId":55,"seasons":[{"seasonNumber":1}],"ratings":{"votes":2666038,"value":9.5}}]`)
+			case "tvdb:300":
+				io.WriteString(w, `[{"title":"Unrated","tvdbId":300,"ratings":{"votes":0,"value":0}}]`)
 			default:
 				io.WriteString(w, `[]`)
 			}
@@ -152,6 +159,12 @@ func TestSonarrLookupPicksMatchingTVDB(t *testing.T) {
 	}
 	if l.Title != "Match" || l.LibraryID != 7 || l.TVDBID != 200 || l.TMDBID != 55 || l.Raw["seasons"] == nil {
 		t.Fatalf("lookup = %+v", l)
+	}
+	if want := (Ratings{IMDB: 9.5, IMDBVotes: 2666038}); l.Ratings != want {
+		t.Errorf("ratings = %+v, want %+v", l.Ratings, want)
+	}
+	if l, err := s.Lookup(context.Background(), 300); err != nil || l.Ratings != (Ratings{}) {
+		t.Fatalf("unrated lookup = %+v, %v", l, err)
 	}
 	if _, err := s.Lookup(context.Background(), 1); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("empty lookup err = %v", err)

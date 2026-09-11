@@ -59,11 +59,12 @@ func (s *Sonarr) Lookup(ctx context.Context, tvdbID int) (*Lookup, error) {
 		return nil, err
 	}
 	type typed struct {
-		ID     int    `json:"id"`
-		Title  string `json:"title"`
-		Year   int    `json:"year"`
-		TVDBID int    `json:"tvdbId"`
-		TMDBID int    `json:"tmdbId"`
+		ID      int    `json:"id"`
+		Title   string `json:"title"`
+		Year    int    `json:"year"`
+		TVDBID  int    `json:"tvdbId"`
+		TMDBID  int    `json:"tmdbId"`
+		Ratings rating `json:"ratings"` // the IMDb rating
 	}
 	pick := -1
 	var picked typed
@@ -86,7 +87,11 @@ func (s *Sonarr) Lookup(ctx context.Context, tvdbID int) (*Lookup, error) {
 	if err := json.Unmarshal(raws[pick], &m); err != nil {
 		return nil, fmt.Errorf("sonarr: decode lookup tvdb:%d: %w", tvdbID, err)
 	}
-	return &Lookup{LibraryID: picked.ID, Title: picked.Title, Year: picked.Year, TMDBID: picked.TMDBID, TVDBID: picked.TVDBID, Raw: m}, nil
+	var ratings Ratings
+	if picked.Ratings.Value > 0 {
+		ratings.IMDB, ratings.IMDBVotes = picked.Ratings.Value, picked.Ratings.Votes
+	}
+	return &Lookup{LibraryID: picked.ID, Title: picked.Title, Year: picked.Year, TMDBID: picked.TMDBID, TVDBID: picked.TVDBID, Ratings: ratings, Raw: m}, nil
 }
 
 // Add adds a looked-up series with the chosen quality profile and root folder.

@@ -36,6 +36,7 @@ type Run struct {
 	ID             int64               `json:"id"`
 	Kind           media.Kind          `json:"kind"`
 	Vibe           string              `json:"vibe,omitempty"`
+	UseTaste       bool                `json:"use_taste"` // false for an open search
 	Model          string              `json:"model"`
 	Effort         string              `json:"effort"`
 	Status         RunStatus           `json:"status"`

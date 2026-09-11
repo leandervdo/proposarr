@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,9 +38,11 @@ func (p *Pipeline) Run(ctx context.Context, req Request) (*Run, error) {
 		return nil, errors.New("pipeline: TMDB is not configured")
 	case isNil(p.d.Agent):
 		return nil, errors.New("pipeline: no agent configured")
+	case req.OpenSearch && strings.TrimSpace(req.Vibe) == "":
+		return nil, errors.New("open search needs a description of what you are looking for")
 	}
 
-	run := &Run{Kind: req.Kind, Vibe: req.Vibe, Model: req.Model, Effort: req.Effort, StartedAt: now(), Picks: []Pick{}}
+	run := &Run{Kind: req.Kind, Vibe: req.Vibe, OpenSearch: req.OpenSearch, Model: req.Model, Effort: req.Effort, StartedAt: now(), Picks: []Pick{}}
 	fail := func(err error) (*Run, error) {
 		run.FinishedAt = now()
 		return run, err
@@ -52,8 +55,11 @@ func (p *Pipeline) Run(ctx context.Context, req Request) (*Run, error) {
 	}
 	run.LibraryCount = len(lib)
 
-	hist := p.history(ctx, req, run.StartedAt, run)
-	run.HistoryCount = len(hist)
+	var hist []history.Entry
+	if !req.OpenSearch {
+		hist = p.history(ctx, req, run.StartedAt, run)
+		run.HistoryCount = len(hist)
+	}
 
 	excluded := map[int]bool{}
 	libIDs := map[int]bool{}
@@ -78,23 +84,37 @@ func (p *Pipeline) Run(ctx context.Context, req Request) (*Run, error) {
 		}
 	}
 
-	prof := profile.Build(req.Kind, lib, hist, p.extraGenres(ctx, req, hist, libIDs, run), req.TopTitles, profile.DefaultWeights)
-	run.Profile = prof
+	var (
+		prof     profile.Profile
+		cands    []candidates.Candidate
+		system   string
+		prompt   string
+		maxItems = req.Picks
+	)
+	if req.OpenSearch {
+		maxItems = searchCount(req.Picks)
+		system, prompt = searchSystemPrompt(req.Kind), searchPrompt(req, lib, maxItems)
+	} else {
+		prof = profile.Build(req.Kind, lib, hist, p.extraGenres(ctx, req, hist, libIDs, run), req.TopTitles, profile.DefaultWeights)
+		run.Profile = prof
 
-	p.progress("Gathering candidates from TMDB…")
-	var disc candidates.Discover
-	if req.Kind == media.Movies && !isNil(p.d.Discover) {
-		disc = p.d.Discover
-	}
-	cands, warns := candidates.Build(ctx, p.d.Meta, disc, prof.Top, func(id int) bool { return excluded[id] },
-		candidates.Options{Kind: req.Kind, Seeds: req.Seeds, Cap: req.Candidates})
-	run.Warnings = append(run.Warnings, warns...)
-	run.CandidateCount = len(cands)
-	if len(cands) == 0 && req.FreePicks == 0 {
-		return fail(errors.New("no candidates found (library/history empty or TMDB unreachable)"))
+		p.progress("Gathering candidates from TMDB…")
+		var disc candidates.Discover
+		if req.Kind == media.Movies && !isNil(p.d.Discover) {
+			disc = p.d.Discover
+		}
+		var warns []string
+		cands, warns = candidates.Build(ctx, p.d.Meta, disc, prof.Top, func(id int) bool { return excluded[id] },
+			candidates.Options{Kind: req.Kind, Seeds: req.Seeds, Cap: req.Candidates})
+		run.Warnings = append(run.Warnings, warns...)
+		run.CandidateCount = len(cands)
+		if len(cands) == 0 && req.FreePicks == 0 {
+			return fail(errors.New("no candidates found (library/history empty or TMDB unreachable)"))
+		}
+		system, prompt = systemPrompt(req.Kind), userPrompt(req, prof, cands)
 	}
 
-	schema, err := pickSchema(req.Picks)
+	schema, err := pickSchema(maxItems)
 	if err != nil {
 		return fail(err)
 	}
@@ -108,8 +128,8 @@ func (p *Pipeline) Run(ctx context.Context, req Request) (*Run, error) {
 	res, err := p.d.Agent.Run(ctx, agent.Options{
 		Model:        req.Model,
 		Effort:       req.Effort,
-		SystemPrompt: systemPrompt(req.Kind),
-		Prompt:       userPrompt(req, prof, cands),
+		SystemPrompt: system,
+		Prompt:       prompt,
 		JSONSchema:   schema,
 		MaxBudgetUSD: req.MaxBudgetUSD,
 		Dir:          dir,

@@ -58,8 +58,9 @@ type Options struct {
 	Settings SettingsService
 	Store    store.Store
 
-	NewRunner  func(progress func(string)) Runner
-	RunRequest func(kind media.Kind, vibe string) (pipeline.Request, error)
+	NewRunner func(progress func(string)) Runner
+	// RunRequest builds a run's settings; useTaste false is an open search.
+	RunRequest func(kind media.Kind, vibe string, useTaste bool) (pipeline.Request, error)
 	Adder      Adder
 	App        func(app string) (catalog AppCatalog, defaultRootFolder string, ok bool)
 	Library    func(ctx context.Context, kind media.Kind) ([]media.Title, error)

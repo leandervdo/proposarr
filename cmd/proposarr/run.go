@@ -19,6 +19,7 @@ func (c *cli) runCmd(ctx context.Context, args []string) error {
 	fs, cfgPath := c.newFlags("run")
 	kindFlag := fs.String("kind", "", "movies or series (required)")
 	vibe := fs.String("vibe", "", "free-text mood for this run")
+	noTaste := fs.Bool("no-taste", false, "open search: find titles matching --vibe, not based on your library or watch history")
 	picks := fs.Int("picks", 0, "number of picks (default from config)")
 	model := fs.String("model", "", "Claude model (default from config)")
 	effort := fs.String("effort", "", "effort: low, medium, high, xhigh, max (default from config)")
@@ -34,6 +35,9 @@ func (c *cli) runCmd(ctx context.Context, args []string) error {
 	}
 	if *picks < 0 {
 		return usageError{"--picks must be positive"}
+	}
+	if *noTaste && strings.TrimSpace(*vibe) == "" {
+		return usageError{"--no-taste needs --vibe describing what you are looking for"}
 	}
 	if *add && *asJSON {
 		return usageError{"--add cannot be combined with --json"}
@@ -56,7 +60,7 @@ func (c *cli) runCmd(ctx context.Context, args []string) error {
 		return err
 	}
 
-	req := runRequest(cfg, kind, strings.TrimSpace(*vibe), env)
+	req := runRequest(cfg, kind, strings.TrimSpace(*vibe), *noTaste, env)
 	if *picks > 0 {
 		req.Picks = *picks
 	}
@@ -146,6 +150,9 @@ func renderRun(w io.Writer, r *pipeline.Run) {
 		name = "Series"
 	}
 	parts := []string{name}
+	if r.OpenSearch {
+		parts = append(parts, "open search")
+	}
 	if r.Model != "" {
 		m := r.Model
 		if r.Effort != "" {
@@ -162,10 +169,15 @@ func renderRun(w io.Writer, r *pipeline.Run) {
 		fmt.Sprintf("%d %s", r.NumTurns, turns),
 		fmt.Sprintf("$%.4f", r.CostUSD),
 		fmt.Sprintf("%s in / %s out", tokens(in), tokens(r.Usage.OutputTokens)),
-		fmt.Sprintf("%d candidates", r.CandidateCount),
 	)
+	if !r.OpenSearch {
+		parts = append(parts, fmt.Sprintf("%d candidates", r.CandidateCount))
+	}
 	fmt.Fprintln(w, strings.Join(parts, " · "))
-	if r.Vibe != "" {
+	switch {
+	case r.OpenSearch:
+		fmt.Fprintf(w, "Search: %q\n", r.Vibe)
+	case r.Vibe != "":
 		fmt.Fprintf(w, "Vibe: %q\n", r.Vibe)
 	}
 	if len(r.Picks) == 0 {
@@ -183,6 +195,20 @@ func renderRun(w io.Writer, r *pipeline.Run) {
 		}
 		if len(p.Streaming) > 0 {
 			details = append(details, "Streaming: "+strings.Join(p.Streaming, ", "))
+		}
+		if r := p.Ratings; r != nil {
+			if r.IMDB != nil {
+				details = append(details, fmt.Sprintf("IMDb %.1f", r.IMDB.Value))
+			}
+			if r.RottenTomatoes > 0 {
+				details = append(details, fmt.Sprintf("RT %d%%", r.RottenTomatoes))
+			}
+			if r.Metacritic > 0 {
+				details = append(details, fmt.Sprintf("Metacritic %d", r.Metacritic))
+			}
+		}
+		if p.IMDBID != "" {
+			details = append(details, "IMDb: https://www.imdb.com/title/"+p.IMDBID+"/")
 		}
 		if len(details) > 0 {
 			fmt.Fprintf(w, "    %s\n", strings.Join(details, " · "))

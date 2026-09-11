@@ -111,7 +111,7 @@ func serverOptions(rt *runtime, st store.Store, log *slog.Logger) web.Options {
 		NewRunner: func(progress func(string)) web.Runner {
 			return rt.state().deps.pipeline(false, progress, st)
 		},
-		RunRequest: func(kind media.Kind, vibe string) (pipeline.Request, error) {
+		RunRequest: func(kind media.Kind, vibe string, useTaste bool) (pipeline.Request, error) {
 			s := rt.state()
 			missing := append(requireTMDB(s.cfg), requireApp(s.cfg, kind)...)
 			if err := missingError("a "+string(kind)+" run", missing); err != nil {
@@ -121,7 +121,7 @@ func serverOptions(rt *runtime, st store.Store, log *slog.Logger) web.Options {
 			if err != nil {
 				return pipeline.Request{}, err
 			}
-			return runRequest(s.cfg, kind, vibe, env), nil
+			return runRequest(s.cfg, kind, vibe, !useTaste, env), nil
 		},
 		Adder: adderFunc(func(ctx context.Context, item request.Item, ch request.Chooser) (request.Result, error) {
 			req := rt.state().deps.requester()

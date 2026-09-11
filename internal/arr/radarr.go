@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -131,16 +132,34 @@ func (r *Radarr) Lookup(ctx context.Context, tmdbID int) (*Lookup, error) {
 		return nil, err
 	}
 	var typed struct {
-		ID     int    `json:"id"`
-		Title  string `json:"title"`
-		Year   int    `json:"year"`
-		TMDBID int    `json:"tmdbId"`
+		ID      int    `json:"id"`
+		Title   string `json:"title"`
+		Year    int    `json:"year"`
+		TMDBID  int    `json:"tmdbId"`
+		Ratings struct {
+			IMDB           rating `json:"imdb"`
+			RottenTomatoes rating `json:"rottenTomatoes"`
+			Metacritic     rating `json:"metacritic"`
+		} `json:"ratings"`
 	}
 	var m map[string]any
 	if json.Unmarshal(raw, &typed) != nil || json.Unmarshal(raw, &m) != nil || typed.TMDBID == 0 {
 		return nil, fmt.Errorf("radarr: movie tmdb:%d not found", tmdbID)
 	}
-	return &Lookup{LibraryID: typed.ID, Title: typed.Title, Year: typed.Year, TMDBID: typed.TMDBID, Raw: m}, nil
+	rt := typed.Ratings
+	ratings := Ratings{RottenTomatoes: percent(rt.RottenTomatoes.Value), Metacritic: percent(rt.Metacritic.Value)}
+	if rt.IMDB.Value > 0 {
+		ratings.IMDB, ratings.IMDBVotes = rt.IMDB.Value, rt.IMDB.Votes
+	}
+	return &Lookup{LibraryID: typed.ID, Title: typed.Title, Year: typed.Year, TMDBID: typed.TMDBID, Ratings: ratings, Raw: m}, nil
+}
+
+// percent rounds a 0-100 rating; anything outside that range is unknown.
+func percent(v float64) int {
+	if v <= 0 || v > 100 {
+		return 0
+	}
+	return int(math.Round(v))
 }
 
 // Add adds a looked-up movie with the chosen quality profile and root folder.

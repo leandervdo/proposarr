@@ -21,6 +21,8 @@ import (
 const (
 	sourceCandidate = "candidate"
 	sourceFree      = "free"
+
+	minIMDBVotes = 1000 // fewer votes are too noisy to rank by
 )
 
 type rawPick struct {
@@ -54,7 +56,8 @@ type keptPick struct {
 }
 
 // verify turns the agent's raw picks into Picks, rejecting anything excluded,
-// duplicated, unresolvable or over the limits.
+// duplicated, unresolvable or over the limits. An open search treats every
+// pick as free and ranks by real ratings before trimming to req.Picks.
 func (p *Pipeline) verify(ctx context.Context, req Request, run *Run, raw []rawPick, cands []candidates.Candidate,
 	excluded map[int]bool, untracked map[string][]int, prof profile.Profile) {
 	byID := make(map[int]candidates.Candidate, len(cands))
@@ -79,7 +82,7 @@ func (p *Pipeline) verify(ctx context.Context, req Request, run *Run, raw []rawP
 		if c, ok := byID[r.TMDBID]; ok && r.TMDBID > 0 {
 			k.pick = Pick{TMDBID: c.TMDBID, Title: c.Title, Year: c.Year, Overview: c.Overview, Genres: c.Genres, Rating: c.Rating, PosterURL: tmdb.PosterURL(c.PosterPath)}
 		} else {
-			if free >= req.FreePicks {
+			if !req.OpenSearch && free >= req.FreePicks {
 				reject(r.TMDBID, title, "free pick limit reached")
 				continue
 			}
@@ -100,7 +103,7 @@ func (p *Pipeline) verify(ctx context.Context, req Request, run *Run, raw []rawP
 		case excluded[k.pick.TMDBID] || matchesUntracked(untracked, k.pick.Title, k.pick.Year):
 			reject(k.pick.TMDBID, k.pick.Title, "already in library or watch history")
 			continue
-		case len(kept) >= req.Picks:
+		case !req.OpenSearch && len(kept) >= req.Picks:
 			reject(k.pick.TMDBID, k.pick.Title, "over pick count")
 			continue
 		}
@@ -117,18 +120,28 @@ func (p *Pipeline) verify(ctx context.Context, req Request, run *Run, raw []rawP
 		kept = append(kept, k)
 	}
 
-	errs := p.enrich(ctx, req, kept)
-	var failed int
-	var first error
+	results := p.enrich(ctx, req, kept)
+	var failed, ratingsTried, ratingsFailed int
+	var first, firstRatings error
 	for i, k := range kept {
-		if errs[i] != nil {
+		res := results[i]
+		if res.ratingsTried {
+			ratingsTried++
+		}
+		if res.ratingsErr != nil {
+			ratingsFailed++
+			if firstRatings == nil {
+				firstRatings = res.ratingsErr
+			}
+		}
+		if res.detailsErr != nil {
 			if k.free {
 				reject(k.pick.TMDBID, k.pick.Title, "id does not resolve on TMDB")
 				continue
 			}
 			failed++
 			if first == nil {
-				first = errs[i]
+				first = res.detailsErr
 			}
 		} else {
 			applyDetails(&k.pick, k.details)
@@ -138,8 +151,85 @@ func (p *Pipeline) verify(ctx context.Context, req Request, run *Run, raw []rawP
 	if failed > 0 {
 		run.Warnings = append(run.Warnings, fmt.Sprintf("tmdb details failed for %d of %d picks: %v", failed, len(kept), first))
 	}
+	if ratingsFailed > 0 {
+		run.Warnings = append(run.Warnings, fmt.Sprintf("ratings failed for %d of %d picks: %v", ratingsFailed, ratingsTried, firstRatings))
+	}
 
+	if req.OpenSearch {
+		// The model's score is its judgement of how well a title fits the request;
+		// weak matches are dropped before real ratings decide the order.
+		matched := run.Picks[:0]
+		for _, pk := range run.Picks {
+			if pk.Score < minSearchMatch {
+				reject(pk.TMDBID, pk.Title, fmt.Sprintf("weak match to the request (%d)", pk.Score))
+				continue
+			}
+			matched = append(matched, pk)
+		}
+		run.Picks = matched
+		rankByRatings(run.Picks)
+		n := min(req.Picks, len(run.Picks))
+		for _, pk := range run.Picks[n:] {
+			reject(pk.TMDBID, pk.Title, "over pick count")
+		}
+		run.Picks = run.Picks[:n]
+		return
+	}
 	sort.SliceStable(run.Picks, func(i, j int) bool { return run.Picks[i].Score > run.Picks[j].Score })
+}
+
+// minSearchMatch is the lowest match score an open-search pick may have.
+const minSearchMatch = 70
+
+// ratingScore is the mean of IMDb × 10 (with enough votes) and the Rotten
+// Tomatoes critic score; false when neither is known.
+func ratingScore(r *Ratings) (float64, bool) {
+	if r == nil {
+		return 0, false
+	}
+	var sum float64
+	n := 0
+	if r.IMDB != nil && r.IMDB.Value > 0 && r.IMDB.Votes >= minIMDBVotes {
+		sum += r.IMDB.Value * 10
+		n++
+	}
+	if r.RottenTomatoes > 0 {
+		sum += float64(r.RottenTomatoes)
+		n++
+	}
+	if n == 0 {
+		return 0, false
+	}
+	return sum / float64(n), true
+}
+
+// rankByRatings orders rated picks by rating score, which becomes their score,
+// followed by unrated picks in the model's score order.
+func rankByRatings(picks []Pick) {
+	type entry struct {
+		pick  Pick
+		score float64
+		rated bool
+	}
+	es := make([]entry, len(picks))
+	for i, pk := range picks {
+		s, ok := ratingScore(pk.Ratings)
+		if ok {
+			pk.Score = int(math.Round(s))
+		} else {
+			s = float64(pk.Score)
+		}
+		es[i] = entry{pk, s, ok}
+	}
+	sort.SliceStable(es, func(i, j int) bool {
+		if es[i].rated != es[j].rated {
+			return es[i].rated
+		}
+		return es[i].score > es[j].score
+	})
+	for i, e := range es {
+		picks[i] = e.pick
+	}
 }
 
 // resolve finds a free pick on TMDB. A model-supplied id is only trusted when
@@ -175,13 +265,22 @@ func (p *Pipeline) resolve(ctx context.Context, req Request, r rawPick) (tmdb.It
 	return tmdb.Item{}, nil, false
 }
 
-// enrich fetches details for kept picks that do not have them yet.
-func (p *Pipeline) enrich(ctx context.Context, req Request, kept []keptPick) []error {
-	errs := make([]error, len(kept))
+type enrichResult struct {
+	detailsErr   error
+	ratingsTried bool
+	ratingsErr   error
+}
+
+// enrich fetches details for kept picks that do not have them yet, and ratings
+// for every pick when a ratings source is configured. A free pick whose
+// details fail is not rated: it will be rejected.
+func (p *Pipeline) enrich(ctx context.Context, req Request, kept []keptPick) []enrichResult {
+	out := make([]enrichResult, len(kept))
+	withRatings := !isNil(p.d.Ratings)
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, detailConcurrency)
 	for i := range kept {
-		if kept[i].details != nil {
+		if kept[i].details != nil && !withRatings {
 			continue
 		}
 		wg.Add(1)
@@ -189,21 +288,56 @@ func (p *Pipeline) enrich(ctx context.Context, req Request, kept []keptPick) []e
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			d, err := p.d.Meta.Details(ctx, req.Kind, kept[i].pick.TMDBID, req.Region)
-			if err != nil {
-				errs[i] = err
-				return
+			k, res := &kept[i], &out[i]
+			if k.details == nil {
+				d, err := p.d.Meta.Details(ctx, req.Kind, k.pick.TMDBID, req.Region)
+				if err != nil {
+					res.detailsErr = err
+					if k.free {
+						return
+					}
+				} else {
+					k.details = &d
+				}
 			}
-			kept[i].details = &d
+			if withRatings {
+				res.ratingsTried = true
+				r, err := p.d.Ratings.Ratings(ctx, req.Kind, k.pick.TMDBID)
+				if err != nil {
+					res.ratingsErr = err
+					return
+				}
+				k.pick.Ratings = normRatings(r)
+			}
 		}(i)
 	}
 	wg.Wait()
-	return errs
+	return out
+}
+
+// normRatings drops unknown (zero) values, and returns nil when nothing is left.
+func normRatings(r *Ratings) *Ratings {
+	if r == nil {
+		return nil
+	}
+	out := *r
+	if out.IMDB != nil && out.IMDB.Value <= 0 {
+		out.IMDB = nil
+	}
+	out.RottenTomatoes = max(out.RottenTomatoes, 0)
+	out.Metacritic = max(out.Metacritic, 0)
+	if out.IMDB == nil && out.RottenTomatoes == 0 && out.Metacritic == 0 {
+		return nil
+	}
+	return &out
 }
 
 func applyDetails(pk *Pick, d *tmdb.Details) {
 	if d == nil {
 		return
+	}
+	if d.IMDBID != "" {
+		pk.IMDBID = d.IMDBID
 	}
 	pk.Streaming = d.Providers
 	if d.PosterPath != "" {

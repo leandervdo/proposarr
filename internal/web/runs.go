@@ -23,7 +23,7 @@ type activeRun struct {
 
 // startRun reserves the kind's slot, records the run and starts it in the
 // background. It returns the HTTP status to use on error.
-func (s *Server) startRun(kind media.Kind, vibe string) (store.Run, int, error) {
+func (s *Server) startRun(kind media.Kind, vibe string, useTaste bool) (store.Run, int, error) {
 	if s.o.NewRunner == nil || s.o.RunRequest == nil || s.o.Store == nil {
 		return store.Run{}, http.StatusServiceUnavailable, errors.New("runs are not available")
 	}
@@ -46,13 +46,13 @@ func (s *Server) startRun(kind media.Kind, vibe string) (store.Run, int, error) 
 		s.wg.Done()
 		return store.Run{}, status, err
 	}
-	req, err := s.o.RunRequest(kind, vibe)
+	req, err := s.o.RunRequest(kind, vibe, useTaste)
 	if err != nil {
 		return abort(http.StatusBadRequest, err)
 	}
-	req.Kind, req.Vibe = kind, vibe
+	req.Kind, req.Vibe, req.OpenSearch = kind, vibe, !useTaste
 
-	rec := store.Run{Kind: kind, Vibe: vibe, Model: req.Model, Effort: req.Effort, Status: store.RunRunning, StartedAt: s.now().UTC()}
+	rec := store.Run{Kind: kind, Vibe: vibe, UseTaste: useTaste, Model: req.Model, Effort: req.Effort, Status: store.RunRunning, StartedAt: s.now().UTC()}
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
 	id, err := s.o.Store.CreateRun(ctx, rec)
 	cancel()

@@ -101,6 +101,11 @@ var migrations = [][]string{
 			updated_at TEXT NOT NULL
 		)`,
 	},
+	{
+		`ALTER TABLE runs ADD COLUMN use_taste INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE picks ADD COLUMN imdb_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE picks ADD COLUMN ratings TEXT`,
+	},
 }
 
 // SQLite is the Store backed by a single SQLite file.
@@ -172,8 +177,8 @@ func (s *SQLite) CreateRun(ctx context.Context, r Run) (int64, error) {
 		r.StartedAt = s.now()
 	}
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO runs (kind, vibe, model, effort, status, started_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		string(r.Kind), r.Vibe, r.Model, r.Effort, RunRunning, fmtTime(r.StartedAt))
+		`INSERT INTO runs (kind, vibe, use_taste, model, effort, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		string(r.Kind), r.Vibe, r.UseTaste, r.Model, r.Effort, RunRunning, fmtTime(r.StartedAt))
 	if err != nil {
 		return 0, fmt.Errorf("store: create run: %w", err)
 	}
@@ -226,8 +231,8 @@ func (s *SQLite) FinishRun(ctx context.Context, id int64, run *pipeline.Run, run
 	}
 
 	if run != nil && len(run.Picks) > 0 {
-		stmt, err := tx.PrepareContext(ctx, `INSERT INTO picks (run_id, tmdb_id, kind, title, year, reason, related_to,
-			score, source, overview, genres, rating, streaming, poster_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		stmt, err := tx.PrepareContext(ctx, `INSERT INTO picks (run_id, tmdb_id, imdb_id, kind, title, year, reason, related_to,
+			score, source, overview, genres, rating, streaming, poster_url, ratings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 		if err != nil {
 			return fmt.Errorf("store: finish run: %w", err)
 		}
@@ -240,8 +245,16 @@ func (s *SQLite) FinishRun(ctx context.Context, id int64, run *pipeline.Run, run
 			related, _ := json.Marshal(nonNil(p.RelatedTo))
 			genres, _ := json.Marshal(nonNil(p.Genres))
 			streaming, _ := json.Marshal(nonNil(p.Streaming))
-			if _, err := stmt.ExecContext(ctx, id, p.TMDBID, string(kind), p.Title, p.Year, p.Reason, string(related),
-				p.Score, p.Source, p.Overview, string(genres), p.Rating, string(streaming), p.PosterURL); err != nil {
+			var ratings any
+			if p.Ratings != nil {
+				b, err := json.Marshal(p.Ratings)
+				if err != nil {
+					return fmt.Errorf("store: encode ratings: %w", err)
+				}
+				ratings = string(b)
+			}
+			if _, err := stmt.ExecContext(ctx, id, p.TMDBID, p.IMDBID, string(kind), p.Title, p.Year, p.Reason, string(related),
+				p.Score, p.Source, p.Overview, string(genres), p.Rating, string(streaming), p.PosterURL, ratings); err != nil {
 				return fmt.Errorf("store: insert pick: %w", err)
 			}
 		}
@@ -268,7 +281,7 @@ func runJSON(run *pipeline.Run) (warnings, rejected string, prof any, err error)
 	return string(w), string(r), prof, nil
 }
 
-const runColumns = `id, kind, vibe, model, effort, status, error, started_at, finished_at, cost_usd,
+const runColumns = `id, kind, vibe, use_taste, model, effort, status, error, started_at, finished_at, cost_usd,
 	input_tokens, output_tokens, num_turns, session_id, library_count, history_count,
 	candidate_count, pick_count, warnings, rejected`
 
@@ -281,7 +294,7 @@ func scanRun(sc scanner, extra ...any) (Run, error) {
 		finished              sql.NullString
 		warnings, rejected    string
 	)
-	dest := []any{&r.ID, &kind, &r.Vibe, &r.Model, &r.Effort, &status, &r.Error, &started, &finished, &r.CostUSD,
+	dest := []any{&r.ID, &kind, &r.Vibe, &r.UseTaste, &r.Model, &r.Effort, &status, &r.Error, &started, &finished, &r.CostUSD,
 		&r.InputTokens, &r.OutputTokens, &r.NumTurns, &r.SessionID, &r.LibraryCount, &r.HistoryCount,
 		&r.CandidateCount, &r.PickCount, &warnings, &rejected}
 	if err := sc.Scan(append(dest, extra...)...); err != nil {
@@ -407,8 +420,8 @@ func (s *SQLite) GetPick(ctx context.Context, id int64) (Pick, error) {
 // queryPicks selects picks joined with their verdict and latest request.
 // limit < 0 means no limit.
 func (s *SQLite) queryPicks(ctx context.Context, where string, args []any, limit int) ([]Pick, error) {
-	q := `SELECT p.id, p.run_id, p.tmdb_id, p.kind, p.title, p.year, p.reason, p.related_to, p.score, p.source,
-			p.overview, p.genres, p.rating, p.streaming, p.poster_url,
+	q := `SELECT p.id, p.run_id, p.tmdb_id, p.imdb_id, p.kind, p.title, p.year, p.reason, p.related_to, p.score, p.source,
+			p.overview, p.genres, p.rating, p.streaming, p.poster_url, p.ratings,
 			v.verdict, v.until, v.decided_at,
 			rq.app, rq.target_id, rq.quality_profile, rq.root_folder, rq.status, rq.error, rq.requested_at
 		FROM picks p
@@ -429,12 +442,13 @@ func (s *SQLite) queryPicks(ctx context.Context, where string, args []any, limit
 		var (
 			p                                       Pick
 			kind, related, genres, streaming        string
+			ratings                                 sql.NullString
 			verdict, until, decided                 sql.NullString
 			app, qp, root, rstatus, rerr, requested sql.NullString
 			target                                  sql.NullInt64
 		)
-		if err := rows.Scan(&p.ID, &p.RunID, &p.TMDBID, &kind, &p.Title, &p.Year, &p.Reason, &related, &p.Score, &p.Source,
-			&p.Overview, &genres, &p.Rating, &streaming, &p.PosterURL,
+		if err := rows.Scan(&p.ID, &p.RunID, &p.TMDBID, &p.IMDBID, &kind, &p.Title, &p.Year, &p.Reason, &related, &p.Score, &p.Source,
+			&p.Overview, &genres, &p.Rating, &streaming, &p.PosterURL, &ratings,
 			&verdict, &until, &decided,
 			&app, &target, &qp, &root, &rstatus, &rerr, &requested); err != nil {
 			return nil, fmt.Errorf("store: scan pick: %w", err)
@@ -448,6 +462,12 @@ func (s *SQLite) queryPicks(ctx context.Context, where string, args []any, limit
 		}
 		if p.Streaming, err = decodeSlice[string](streaming); err != nil {
 			return nil, err
+		}
+		if ratings.Valid && ratings.String != "" {
+			p.Ratings = &pipeline.Ratings{}
+			if err := json.Unmarshal([]byte(ratings.String), p.Ratings); err != nil {
+				return nil, fmt.Errorf("store: decode ratings: %w", err)
+			}
 		}
 		if verdict.Valid {
 			p.Verdict = Verdict(verdict.String)

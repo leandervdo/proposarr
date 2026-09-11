@@ -31,13 +31,20 @@ type Exclusions interface {
 	Excluded(ctx context.Context, kind media.Kind) (map[int]bool, error)
 }
 
-// Deps are the ports a run needs. History, Discover and Exclusions are optional.
+// RatingsSource looks up real ratings for a title (Radarr/Sonarr metadata).
+// It returns nil when none are known.
+type RatingsSource interface {
+	Ratings(ctx context.Context, kind media.Kind, tmdbID int) (*Ratings, error)
+}
+
+// Deps are the ports a run needs. History, Discover, Exclusions and Ratings are optional.
 type Deps struct {
 	Library    Library
 	History    []history.Source
 	Meta       Metadata
 	Discover   candidates.Discover // movies only
 	Exclusions Exclusions
+	Ratings    RatingsSource
 	Agent      agent.Provider
 	Progress   func(msg string) // optional progress lines
 	Now        func() time.Time
@@ -47,6 +54,7 @@ type Deps struct {
 type Request struct {
 	Kind         media.Kind
 	Vibe         string
+	OpenSearch   bool // search by Vibe alone, without history, profile or candidates
 	Model        string
 	Effort       string
 	Picks        int
@@ -63,6 +71,7 @@ type Request struct {
 
 type Pick struct {
 	TMDBID    int        `json:"tmdb_id"`
+	IMDBID    string     `json:"imdb_id,omitempty"`
 	Kind      media.Kind `json:"kind"`
 	Title     string     `json:"title"`
 	Year      int        `json:"year,omitempty"`
@@ -75,6 +84,19 @@ type Pick struct {
 	Rating    float64    `json:"rating,omitempty"`
 	Streaming []string   `json:"streaming,omitempty"`
 	PosterURL string     `json:"poster_url,omitempty"`
+	Ratings   *Ratings   `json:"ratings,omitempty"`
+}
+
+// Ratings are real third-party ratings; zero values are unknown.
+type Ratings struct {
+	IMDB           *IMDBRating `json:"imdb,omitempty"`
+	RottenTomatoes int         `json:"rotten_tomatoes,omitempty"` // critic score, 0-100
+	Metacritic     int         `json:"metacritic,omitempty"`      // 0-100
+}
+
+type IMDBRating struct {
+	Value float64 `json:"value"` // 0-10
+	Votes int     `json:"votes"`
 }
 
 type Rejected struct {
@@ -86,6 +108,7 @@ type Rejected struct {
 type Run struct {
 	Kind           media.Kind      `json:"kind"`
 	Vibe           string          `json:"vibe,omitempty"`
+	OpenSearch     bool            `json:"open_search,omitempty"`
 	Model          string          `json:"model"`
 	Effort         string          `json:"effort"`
 	StartedAt      time.Time       `json:"started_at"`

@@ -92,7 +92,72 @@ func (d *deps) pipeline(refresh bool, progress func(string), excl pipeline.Exclu
 	if d.radarr != nil {
 		pd.Discover = d.radarr
 	}
+	if r := d.ratings(); r != nil {
+		pd.Ratings = r
+	}
 	return pipeline.New(pd)
+}
+
+// ratings reads pick ratings from Radarr (movies) and Sonarr (series, via the
+// TVDB id from TMDB). Nil when neither app is configured.
+func (d *deps) ratings() *arrRatings {
+	r := &arrRatings{}
+	if d.radarr != nil {
+		r.radarr = d.radarr
+	}
+	if d.sonarr != nil && d.tmdb != nil {
+		r.sonarr, r.tvdb = d.sonarr, d.tmdb
+	}
+	if r.radarr == nil && r.sonarr == nil {
+		return nil
+	}
+	return r
+}
+
+type arrLookup interface {
+	Lookup(ctx context.Context, id int) (*arr.Lookup, error)
+}
+
+type arrRatings struct {
+	radarr arrLookup // by TMDB id
+	sonarr arrLookup // by TVDB id
+	tvdb   interface {
+		TVDBID(ctx context.Context, tmdbID int) (int, error)
+	}
+}
+
+func (a *arrRatings) Ratings(ctx context.Context, kind media.Kind, tmdbID int) (*pipeline.Ratings, error) {
+	var (
+		l   *arr.Lookup
+		err error
+	)
+	switch {
+	case kind == media.Series && a.sonarr != nil:
+		tvdb, terr := a.tvdb.TVDBID(ctx, tmdbID)
+		if terr != nil || tvdb == 0 {
+			return nil, terr
+		}
+		l, err = a.sonarr.Lookup(ctx, tvdb)
+	case kind == media.Movies && a.radarr != nil:
+		l, err = a.radarr.Lookup(ctx, tmdbID)
+	default:
+		return nil, nil
+	}
+	if err != nil || l == nil {
+		return nil, err
+	}
+	return pipelineRatings(l.Ratings), nil
+}
+
+func pipelineRatings(r arr.Ratings) *pipeline.Ratings {
+	out := pipeline.Ratings{RottenTomatoes: r.RottenTomatoes, Metacritic: r.Metacritic}
+	if r.IMDB > 0 {
+		out.IMDB = &pipeline.IMDBRating{Value: r.IMDB, Votes: r.IMDBVotes}
+	}
+	if out.IMDB == nil && out.RottenTomatoes == 0 && out.Metacritic == 0 {
+		return nil
+	}
+	return &out
 }
 
 func (d *deps) requester() *request.Requester {
@@ -114,11 +179,12 @@ func (d *deps) requester() *request.Requester {
 }
 
 // runRequest builds a pipeline request from the per-kind settings.
-func runRequest(cfg config.Config, kind media.Kind, vibe string, env []string) pipeline.Request {
+func runRequest(cfg config.Config, kind media.Kind, vibe string, openSearch bool, env []string) pipeline.Request {
 	ks := cfg.Kind(kind)
 	return pipeline.Request{
 		Kind:         kind,
 		Vibe:         vibe,
+		OpenSearch:   openSearch,
 		Model:        ks.Model,
 		Effort:       ks.Effort,
 		Picks:        ks.Picks,

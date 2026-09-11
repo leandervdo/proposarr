@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,17 +31,27 @@ type fakeLib struct {
 func (f fakeLib) Titles(context.Context, media.Kind) ([]media.Title, error) { return f.titles, f.err }
 
 type fakeMeta struct {
-	mu      sync.Mutex
-	recs    map[int][]tmdb.Item
-	details map[int]tmdb.Details
-	search  map[string][]tmdb.Item // keyed by media.NormTitle(query)
+	mu       sync.Mutex
+	recs     map[int][]tmdb.Item
+	details  map[int]tmdb.Details
+	search   map[string][]tmdb.Item // keyed by media.NormTitle(query)
+	related  int                    // Recommendations and Similar calls
+	searches []string
 }
 
 func (m *fakeMeta) Recommendations(_ context.Context, _ media.Kind, id int) ([]tmdb.Item, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.related++
 	return m.recs[id], nil
 }
 
-func (m *fakeMeta) Similar(context.Context, media.Kind, int) ([]tmdb.Item, error) { return nil, nil }
+func (m *fakeMeta) Similar(context.Context, media.Kind, int) ([]tmdb.Item, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.related++
+	return nil, nil
+}
 
 func (m *fakeMeta) Details(_ context.Context, _ media.Kind, id int, _ string) (tmdb.Details, error) {
 	m.mu.Lock()
@@ -53,8 +64,47 @@ func (m *fakeMeta) Details(_ context.Context, _ media.Kind, id int, _ string) (t
 }
 
 func (m *fakeMeta) Search(_ context.Context, _ media.Kind, q string, _ int) ([]tmdb.Item, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.searches = append(m.searches, q)
 	return m.search[media.NormTitle(q)], nil
 }
+
+type countingHistory struct{ calls atomic.Int32 }
+
+func (h *countingHistory) Name() string               { return "plex" }
+func (h *countingHistory) Ping(context.Context) error { return nil }
+func (h *countingHistory) History(context.Context, media.Kind, time.Time) ([]history.Entry, error) {
+	h.calls.Add(1)
+	return nil, nil
+}
+
+type countingDiscover struct{ calls atomic.Int32 }
+
+func (d *countingDiscover) Discover(context.Context) ([]arr.ListMovie, error) {
+	d.calls.Add(1)
+	return nil, nil
+}
+
+type fakeExclusions map[int]bool
+
+func (e fakeExclusions) Excluded(context.Context, media.Kind) (map[int]bool, error) { return e, nil }
+
+type fakeRatings struct {
+	mu    sync.Mutex
+	byID  map[int]*Ratings
+	errs  map[int]error
+	calls []int
+}
+
+func (f *fakeRatings) Ratings(_ context.Context, _ media.Kind, id int) (*Ratings, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, id)
+	return f.byID[id], f.errs[id]
+}
+
+func imdb(value float64, votes int) *IMDBRating { return &IMDBRating{Value: value, Votes: votes} }
 
 type fakeHistory struct {
 	name    string
@@ -76,6 +126,7 @@ func det(id int, title string, year int, providers ...string) tmdb.Details {
 	return tmdb.Details{
 		Item:      tmdb.Item{ID: id, Kind: media.Movies, Title: title, Year: year, Overview: title + " overview", Genres: []string{"Drama"}, Rating: 8, PosterPath: fmt.Sprintf("/%d.jpg", id)},
 		Providers: providers,
+		IMDBID:    fmt.Sprintf("tt%07d", id),
 	}
 }
 
@@ -197,6 +248,12 @@ func TestRunHappyPath(t *testing.T) {
 	if run.Picks[1].PosterURL != "https://image.tmdb.org/t/p/w500/329865.jpg" || run.Picks[1].Overview != "Arrival overview" {
 		t.Errorf("arrival not enriched: %+v", run.Picks[1])
 	}
+	if run.Picks[0].IMDBID != "tt0000603" || run.Picks[1].IMDBID != "tt0329865" {
+		t.Errorf("imdb ids: free %q, candidate %q", run.Picks[0].IMDBID, run.Picks[1].IMDBID)
+	}
+	if run.OpenSearch || run.Picks[0].Ratings != nil {
+		t.Errorf("open search %v, ratings without a source %+v", run.OpenSearch, run.Picks[0].Ratings)
+	}
 
 	reasons := map[string]string{}
 	for _, r := range run.Rejected {
@@ -286,6 +343,218 @@ func TestRunFreePickTrustsMatchingID(t *testing.T) {
 	}
 	if len(run.Picks) != 2 || run.Picks[0].Source != "free" || run.Picks[1].Source != "candidate" {
 		t.Errorf("picks = %+v, rejected = %+v", run.Picks, run.Rejected)
+	}
+	// The free pick's details came from resolution, not enrichment.
+	if run.Picks[0].IMDBID != "tt0000603" || run.Picks[1].IMDBID != "tt0000348" {
+		t.Errorf("imdb ids = %q, %q", run.Picks[0].IMDBID, run.Picks[1].IMDBID)
+	}
+}
+
+func TestRunTasteKeepsOrderWithRatings(t *testing.T) {
+	lib, hist, meta := fixture()
+	fake := &agent.Fake{Result: agent.Result{Structured: structured(t,
+		pk(329865, "Arrival", 2016, 91, "candidate"),
+		pk(0, "The Matrix", 1999, 95, "free"),
+		pk(49047, "Gravity", 2013, 70, "candidate"),
+	)}}
+	ratings := &fakeRatings{
+		byID: map[int]*Ratings{
+			49047:  {IMDB: imdb(9.9, 900000), RottenTomatoes: 99},
+			603:    {IMDB: imdb(8.7, 2000000)},
+			329865: {IMDB: imdb(0, 0)}, // unknown only
+		},
+		errs: map[int]error{},
+	}
+	p := New(Deps{Library: lib, History: []history.Source{hist}, Meta: meta, Agent: fake, Ratings: ratings})
+	run, err := p.Run(context.Background(), Request{Kind: media.Movies, Picks: 3, FreePicks: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids, scores []int
+	for _, pick := range run.Picks {
+		ids, scores = append(ids, pick.TMDBID), append(scores, pick.Score)
+	}
+	if fmt.Sprint(ids) != "[603 329865 49047]" || fmt.Sprint(scores) != "[95 91 70]" {
+		t.Fatalf("taste order changed: ids %v scores %v", ids, scores)
+	}
+	if r := run.Picks[2].Ratings; r == nil || r.RottenTomatoes != 99 || r.IMDB.Votes != 900000 {
+		t.Errorf("gravity ratings = %+v", r)
+	}
+	if run.Picks[1].Ratings != nil {
+		t.Errorf("zero ratings must be dropped: %+v", run.Picks[1].Ratings)
+	}
+	if len(ratings.calls) != 3 {
+		t.Errorf("ratings calls = %v", ratings.calls)
+	}
+}
+
+func TestRunRatingsFailureWarns(t *testing.T) {
+	lib, hist, meta := fixture()
+	fake := &agent.Fake{Result: agent.Result{Structured: structured(t,
+		pk(329865, "Arrival", 2016, 91, "candidate"),
+		pk(49047, "Gravity", 2013, 70, "candidate"),
+	)}}
+	ratings := &fakeRatings{
+		byID: map[int]*Ratings{329865: {RottenTomatoes: 94}},
+		errs: map[int]error{49047: errors.New("radarr: movie tmdb:49047 not found")},
+	}
+	p := New(Deps{Library: lib, History: []history.Source{hist}, Meta: meta, Agent: fake, Ratings: ratings})
+	run, err := p.Run(context.Background(), Request{Kind: media.Movies, Picks: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Picks) != 2 || run.Picks[0].Ratings == nil || run.Picks[1].Ratings != nil {
+		t.Fatalf("picks = %+v", run.Picks)
+	}
+	if !hasWarning(run, "ratings failed for 1 of 2 picks: radarr: movie tmdb:49047 not found") {
+		t.Errorf("warnings = %v", run.Warnings)
+	}
+}
+
+func TestRunOpenSearch(t *testing.T) {
+	_, _, meta := fixture()
+	lib := fakeLib{titles: []media.Title{
+		{TMDBID: 157336, Title: "Interstellar", Year: 2014, Added: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{TMDBID: 686, Title: "Contact", Year: 1997, Added: time.Date(2025, 5, 1, 0, 0, 0, 0, time.UTC)},
+		{Title: "Primer", Year: 2004, Added: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)},
+	}}
+	for _, d := range []tmdb.Details{
+		det(157336, "Interstellar", 2014), det(949, "Heat", 1995), det(1124, "The Prestige", 2006), det(27205, "Inception", 2010), det(8195, "Ronin", 1998),
+	} {
+		meta.details[d.ID] = d
+	}
+	for _, it := range []tmdb.Item{item(949, "Heat", 1995), item(1124, "The Prestige", 2006), item(27205, "Inception", 2010), item(14337, "Primer", 2004), item(8195, "Ronin", 1998)} {
+		meta.search[media.NormTitle(it.Title)] = []tmdb.Item{it}
+	}
+	ratings := &fakeRatings{byID: map[int]*Ratings{
+		949:   {IMDB: imdb(8.3, 700000), RottenTomatoes: 88}, // both: 85.5
+		603:   {IMDB: imdb(8.7, 2000000), Metacritic: 73},    // IMDb only: 87
+		1124:  {RottenTomatoes: 76},                          // RT only: 76
+		27205: {IMDB: imdb(9.9, 500)},                        // too few votes: unrated
+	}}
+	hist := &countingHistory{}
+	disc := &countingDiscover{}
+	fake := &agent.Fake{Result: agent.Result{Structured: structured(t,
+		pk(0, "Inception", 2010, 72, "free"),
+		pk(0, "Ronin", 1998, 60, "free"), // resolves, but a weak match to the request
+		pk(0, "Heat", 1995, 95, "free"),
+		pk(157336, "Interstellar", 2014, 90, "free"),
+		pk(348, "Alien", 1979, 85, "free"),
+		pk(603, "The Matrix", 1999, 80, "candidate", "Interstellar (2014)"),
+		pk(0, "Primer", 2004, 75, "free"),
+		pk(0, "The Prestige", 2006, 70, "free"),
+		pk(329865, "Arrival", 2016, 99, "free"), // no ratings
+	)}}
+	p := New(Deps{Library: lib, History: []history.Source{hist}, Meta: meta, Discover: disc, Agent: fake,
+		Exclusions: fakeExclusions{348: true}, Ratings: ratings})
+
+	run, err := p.Run(context.Background(), Request{Kind: media.Movies, OpenSearch: true, Vibe: "heist movies with a twist",
+		Picks: 4, FreePicks: 1, TopTitles: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !run.OpenSearch || run.LibraryCount != 3 || run.HistoryCount != 0 || run.CandidateCount != 0 || run.Profile.Kind != "" || len(run.Profile.Top) != 0 {
+		t.Errorf("run = %+v", run)
+	}
+	if hist.calls.Load() != 0 || disc.calls.Load() != 0 || meta.related != 0 {
+		t.Errorf("open search read history %d, discover %d, related %d times", hist.calls.Load(), disc.calls.Load(), meta.related)
+	}
+
+	want := []struct {
+		id, score int
+	}{{603, 87}, {949, 86}, {1124, 76}, {329865, 99}}
+	if len(run.Picks) != len(want) {
+		t.Fatalf("picks = %+v\nrejected = %+v", run.Picks, run.Rejected)
+	}
+	for i, w := range want {
+		got := run.Picks[i]
+		if got.TMDBID != w.id || got.Score != w.score || got.Source != "free" || got.RelatedTo == nil || len(got.RelatedTo) != 0 {
+			t.Errorf("pick %d = %+v, want id %d score %d", i, got, w.id, w.score)
+		}
+	}
+	if run.Picks[1].IMDBID != "tt0000949" || run.Picks[0].Ratings == nil || run.Picks[0].Ratings.Metacritic != 73 {
+		t.Errorf("heat imdb %q, matrix ratings %+v", run.Picks[1].IMDBID, run.Picks[0].Ratings)
+	}
+
+	reasons := map[string]string{}
+	for _, r := range run.Rejected {
+		reasons[r.Title] = r.Reason
+	}
+	wantReasons := map[string]string{
+		"Interstellar": "already in library or watch history",
+		"Alien":        "already in library or watch history",
+		"Primer":       "already in library or watch history",
+		"Inception":    "over pick count",
+		"Ronin":        "weak match to the request (60)",
+	}
+	if len(run.Rejected) != len(wantReasons) {
+		t.Errorf("rejected = %+v", run.Rejected)
+	}
+	for title, reason := range wantReasons {
+		if reasons[title] != reason {
+			t.Errorf("%s rejected with %q, want %q", title, reasons[title], reason)
+		}
+	}
+	for _, q := range []string{"Heat", "Inception", "The Prestige", "Primer"} {
+		if !strings.Contains(strings.Join(meta.searches, "|"), q) {
+			t.Errorf("%s not resolved through search: %v", q, meta.searches)
+		}
+	}
+
+	o := fake.Calls()[0]
+	for _, s := range []string{
+		`Recommend 8 movies that match this request: "heist movies with a twist".`,
+		"1. Satisfies every explicit constraint in the request (decade or years, country, language, genre, length)",
+		"score is 0-100 and means how well the movie fits the request",
+		"2. Highest overall quality and critical acclaim",
+		"4. A mix of popular titles and lesser-known hidden gems",
+		"5. Consider both classic and recent releases that have stood the test of time",
+		"## Titles I already have — do not suggest these\n- Contact (1997)\n- Interstellar (2014)\n(and 1 more)\n",
+		"related_to is an empty array",
+	} {
+		if !strings.Contains(o.Prompt, s) {
+			t.Errorf("prompt missing %q:\n%s", s, o.Prompt)
+		}
+	}
+	if strings.Contains(o.Prompt, "Primer") || strings.Contains(o.Prompt, "## Candidates") || strings.Contains(o.Prompt, "Taste profile") {
+		t.Errorf("prompt has more than the owned list:\n%s", o.Prompt)
+	}
+	if !strings.Contains(o.SystemPrompt, "You are a movie search assistant") || !strings.Contains(o.JSONSchema, `"maxItems":8`) {
+		t.Errorf("system %q schema %s", o.SystemPrompt, o.JSONSchema)
+	}
+}
+
+func TestRunOpenSearchNeedsVibe(t *testing.T) {
+	lib, _, meta := fixture()
+	fake := &agent.Fake{}
+	p := New(Deps{Library: lib, Meta: meta, Agent: fake})
+	run, err := p.Run(context.Background(), Request{Kind: media.Series, OpenSearch: true, Vibe: "  "})
+	if err == nil || run != nil || len(fake.Calls()) != 0 {
+		t.Fatalf("run=%v err=%v calls=%d", run, err, len(fake.Calls()))
+	}
+}
+
+func TestRankByRatings(t *testing.T) {
+	picks := []Pick{
+		{Title: "unrated high", Score: 95},
+		{Title: "imdb only", Score: 10, Ratings: &Ratings{IMDB: imdb(8.0, 5000)}},
+		{Title: "few votes", Score: 70, Ratings: &Ratings{IMDB: imdb(9.5, 10)}},
+		{Title: "rt only", Score: 10, Ratings: &Ratings{RottenTomatoes: 90}},
+		{Title: "metacritic only", Score: 80, Ratings: &Ratings{Metacritic: 99}},
+		{Title: "both", Score: 10, Ratings: &Ratings{IMDB: imdb(7.0, 10000), RottenTomatoes: 80}},
+		{Title: "few votes with rt", Score: 99, Ratings: &Ratings{IMDB: imdb(9.9, 999), RottenTomatoes: 50}},
+	}
+	rankByRatings(picks)
+	var got []string
+	for _, p := range picks {
+		got = append(got, fmt.Sprintf("%s=%d", p.Title, p.Score))
+	}
+	want := "rt only=90, imdb only=80, both=75, few votes with rt=50, unrated high=95, metacritic only=80, few votes=70"
+	if strings.Join(got, ", ") != want {
+		t.Errorf("got  %s\nwant %s", strings.Join(got, ", "), want)
+	}
+	if searchCount(3) != 6 || searchCount(30) != 50 {
+		t.Errorf("searchCount = %d, %d", searchCount(3), searchCount(30))
 	}
 }
 

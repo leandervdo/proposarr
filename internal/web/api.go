@@ -110,8 +110,9 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Kind string `json:"kind"`
-		Vibe string `json:"vibe"`
+		Kind     string `json:"kind"`
+		Vibe     string `json:"vibe"`
+		UseTaste *bool  `json:"use_taste"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -122,7 +123,13 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	run, status, err := s.startRun(kind, strings.TrimSpace(body.Vibe))
+	vibe := strings.TrimSpace(body.Vibe)
+	useTaste := body.UseTaste == nil || *body.UseTaste
+	if !useTaste && vibe == "" {
+		writeError(w, http.StatusBadRequest, "describe what you are looking for")
+		return
+	}
+	run, status, err := s.startRun(kind, vibe, useTaste)
 	if err != nil {
 		writeError(w, status, err.Error())
 		return

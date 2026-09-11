@@ -177,8 +177,9 @@ func TestRenderRun(t *testing.T) {
 		Usage:          agent.Usage{InputTokens: 200, CacheCreationInputTokens: 45000, OutputTokens: 3100},
 		CandidateCount: 150,
 		Picks: []pipeline.Pick{
-			{TMDBID: 329865, Title: "Arrival", Year: 2016, Score: 92, Reason: "Because you rewatched Interstellar.",
-				RelatedTo: []string{"Interstellar", "Contact"}, Streaming: []string{"Netflix"}},
+			{TMDBID: 329865, IMDBID: "tt2543164", Title: "Arrival", Year: 2016, Score: 92, Reason: "Because you rewatched Interstellar.",
+				RelatedTo: []string{"Interstellar", "Contact"}, Streaming: []string{"Netflix"},
+				Ratings: &pipeline.Ratings{IMDB: &pipeline.IMDBRating{Value: 7.9, Votes: 850000}, RottenTomatoes: 94}},
 			{TMDBID: 1, Title: "Bare", Score: 50},
 		},
 	}
@@ -189,15 +190,94 @@ func TestRenderRun(t *testing.T) {
 		"Movies · claude-sonnet-5/medium · 3 turns · $0.1234 · 45.2k in / 3.1k out · 150 candidates",
 		" 1. Arrival (2016)  score 92  tmdb:329865",
 		"    Because you rewatched Interstellar.",
-		"    Related: Interstellar, Contact · Streaming: Netflix",
+		"    Related: Interstellar, Contact · Streaming: Netflix · IMDb 7.9 · RT 94% · IMDb: https://www.imdb.com/title/tt2543164/",
 		" 2. Bare  score 50  tmdb:1",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "Related: \n") || strings.Count(out, "Related:") != 1 {
+	if strings.Contains(out, "Related: \n") || strings.Count(out, "Related:") != 1 || strings.Contains(out, "Search:") {
 		t.Errorf("empty details should be omitted:\n%s", out)
+	}
+
+	buf.Reset()
+	renderRun(&buf, &pipeline.Run{Kind: media.Series, OpenSearch: true, Vibe: "short Korean thrillers", Model: "claude-sonnet-5", NumTurns: 1,
+		Picks: []pipeline.Pick{{TMDBID: 2, Title: "Signal", Score: 85, Source: "free", RelatedTo: []string{}}}})
+	out = buf.String()
+	if !strings.Contains(out, "Series · open search · claude-sonnet-5 · 1 turn") || strings.Contains(out, "candidates") ||
+		!strings.Contains(out, `Search: "short Korean thrillers"`) || strings.Contains(out, "Vibe:") {
+		t.Errorf("open search output:\n%s", out)
+	}
+}
+
+func TestRunNoTasteNeedsVibe(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, args := range [][]string{
+		{"run", "--kind", "movies", "--no-taste"},
+		{"run", "--kind", "series", "--no-taste", "--vibe", "   "},
+	} {
+		c, _, stderr := newTestCLI(false)
+		if code := c.dispatch(context.Background(), args); code != 2 {
+			t.Errorf("%v: exit %d, want 2", args, code)
+		}
+		if !strings.Contains(stderr.String(), "--no-taste needs --vibe") {
+			t.Errorf("%v: stderr %q", args, stderr.String())
+		}
+	}
+	// With a description the flags are valid; the run then stops at the missing config.
+	c, _, stderr := newTestCLI(false)
+	if code := c.dispatch(context.Background(), []string{"run", "--kind", "movies", "--no-taste", "--vibe", "90s heist movies"}); code != 1 {
+		t.Fatalf("exit %d, want 1 (stderr %q)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "PROPOSARR_TMDB_API_KEY") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+type fakeLookup struct {
+	ids []int
+	l   *arr.Lookup
+	err error
+}
+
+func (f *fakeLookup) Lookup(_ context.Context, id int) (*arr.Lookup, error) {
+	f.ids = append(f.ids, id)
+	return f.l, f.err
+}
+
+type fakeTVDB map[int]int
+
+func (f fakeTVDB) TVDBID(_ context.Context, tmdbID int) (int, error) { return f[tmdbID], nil }
+
+func TestArrRatings(t *testing.T) {
+	ctx := context.Background()
+	radarr := &fakeLookup{l: &arr.Lookup{Ratings: arr.Ratings{IMDB: 8.7, IMDBVotes: 2275363, RottenTomatoes: 83, Metacritic: 73}}}
+	sonarr := &fakeLookup{l: &arr.Lookup{Ratings: arr.Ratings{IMDB: 9.5, IMDBVotes: 2666038}}}
+	a := &arrRatings{radarr: radarr, sonarr: sonarr, tvdb: fakeTVDB{1396: 81189}}
+
+	got, err := a.Ratings(ctx, media.Movies, 157336)
+	if err != nil || got == nil || got.IMDB == nil || *got.IMDB != (pipeline.IMDBRating{Value: 8.7, Votes: 2275363}) ||
+		got.RottenTomatoes != 83 || got.Metacritic != 73 || radarr.ids[0] != 157336 {
+		t.Fatalf("movie ratings = %+v, %v (lookups %v)", got, err, radarr.ids)
+	}
+	got, err = a.Ratings(ctx, media.Series, 1396)
+	if err != nil || got == nil || got.IMDB.Value != 9.5 || got.RottenTomatoes != 0 || len(sonarr.ids) != 1 || sonarr.ids[0] != 81189 {
+		t.Fatalf("series ratings = %+v, %v (lookups %v)", got, err, sonarr.ids)
+	}
+	if got, err := a.Ratings(ctx, media.Series, 7); got != nil || err != nil || len(sonarr.ids) != 1 {
+		t.Fatalf("series without tvdb id = %+v, %v (lookups %v)", got, err, sonarr.ids)
+	}
+	radarr.l = &arr.Lookup{}
+	if got, err := a.Ratings(ctx, media.Movies, 1); got != nil || err != nil {
+		t.Fatalf("unrated movie = %+v, %v", got, err)
+	}
+	radarr.err = errors.New("radarr: movie tmdb:1 not found")
+	if _, err := a.Ratings(ctx, media.Movies, 1); err == nil {
+		t.Fatal("lookup error swallowed")
+	}
+	if got, err := (&arrRatings{radarr: radarr}).Ratings(ctx, media.Series, 1396); got != nil || err != nil {
+		t.Fatalf("no sonarr = %+v, %v", got, err)
 	}
 }
 

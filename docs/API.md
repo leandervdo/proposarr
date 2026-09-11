@@ -16,7 +16,7 @@ type Verdict = "accepted" | "ignored" | "later";
 interface Rejected { tmdb_id?: number; title: string; reason: string }
 
 interface Run {
-  id: number; kind: Kind; vibe?: string; model: string; effort: string;
+  id: number; kind: Kind; vibe?: string; use_taste: boolean; model: string; effort: string;
   status: RunStatus; error?: string; started_at: string; finished_at?: string;
   cost_usd: number; input_tokens: number; output_tokens: number; num_turns: number;
   session_id?: string; library_count: number; history_count: number;
@@ -31,10 +31,19 @@ interface Request {
 }
 
 interface Pick {
-  id: number; run_id: number; tmdb_id: number; kind: Kind; title: string; year?: number;
+  id: number; run_id: number; tmdb_id: number; imdb_id?: string; kind: Kind; title: string; year?: number;
   reason: string; related_to: string[]; score: number; source: "candidate" | "free";
   overview?: string; genres?: string[]; rating?: number; streaming?: string[]; poster_url?: string;
+  ratings?: Ratings;
   verdict?: Verdict; verdict_at?: string; later_until?: string; request?: Request;
+}
+
+// Real ratings. Movies: from Radarr's metadata (IMDb, Rotten Tomatoes critic score, Metacritic).
+// Series: Sonarr only carries the IMDb rating. Unknown values are omitted.
+interface Ratings {
+  imdb?: { value: number; votes: number };  // 0–10
+  rotten_tomatoes?: number;                 // critic score, 0–100
+  metacritic?: number;                      // 0–100
 }
 
 interface ProfileEntry {
@@ -65,7 +74,7 @@ interface RootFolder { id: number; path: string; free_space: number }
 | GET | `/api/config` | | Settings with secrets replaced by booleans, e.g. `radarr: {url, api_key_set, root_folder}`, `claude: {bin, auth, timeout, max_budget_usd}`, `movies`/`series: {model, effort, picks, candidates, free_picks}` |
 | GET | `/api/runs?limit=50` | | `Run[]`, newest first, without `profile` |
 | GET | `/api/runs/{id}` | | `{run: Run, picks: Pick[]}` |
-| POST | `/api/runs` | `{kind, vibe?}` | `202 Run` (status `running`). `409` when a run of that kind is already running. `400` when the kind's app or TMDB is not configured |
+| POST | `/api/runs` | `{kind, vibe?, use_taste?}` | `202 Run` (status `running`). `use_taste` defaults to `true`; see "Open search" below. `409` when a run of that kind is already running. `400` when the kind's app or TMDB is not configured, or when `use_taste` is `false` and `vibe` is empty |
 | GET | `/api/picks?kind=&run=latest\|{id}&verdict=none\|accepted\|ignored\|later` | | `Pick[]`, newest run first, then score |
 | POST | `/api/picks/{id}/verdict` | `{verdict: Verdict \| "", later_days?: number}` | `Pick`. `later_days` defaults to 30. `""` clears the verdict (undo) |
 | GET | `/api/apps/{radarr\|sonarr}/options` | | `{quality_profiles: QualityProfile[], root_folders: RootFolder[], default_root_folder: string}` |
@@ -75,6 +84,23 @@ interface RootFolder { id: number; path: string; free_space: number }
 | GET | `/healthz` | | `200 ok`, plain text. Never requires auth (for container health checks) |
 
 Everything else under `/` serves the single-page app, falling back to `index.html`.
+
+## Open search
+
+A run normally ranks candidates against the taste profile (`use_taste: true`). With `use_taste: false` it is a search driven only by the free-text `vibe` ("90s heist movies with a twist ending", "short Korean thrillers"), not by the library or watch history:
+
+- No watch history is read, no taste profile is built and no TMDB candidate list is gathered. The run's `history_count` and `candidate_count` are 0 and `profile` is absent.
+- Claude suggests titles from the description alone. Every suggestion is resolved on TMDB by title and year (the same check as free picks) and dropped when it does not resolve.
+- Titles already in the library, accepted, ignored, postponed or requested are still left out. The owned titles are listed in the prompt (up to the profile size) so Claude avoids them.
+- Picks have `source: "free"` and may have an empty `related_to`; `reason` says how the title matches the description.
+- Explicit constraints in the description (decade, country, language, genre) are hard requirements. Claude scores each suggestion on how well it fits the description; suggestions below 70 are dropped, so a search can return fewer picks rather than off-target ones.
+- Ranking uses real ratings, not Claude's estimate. Claude suggests about twice the pick count (at most 50); after verification each remaining pick's rating score is the mean of the available values among IMDb × 10 (only with at least 1,000 votes) and the Rotten Tomatoes critic score. Picks are ordered by that score, the best `picks` are kept, and `score` is the rating score (rounded). A pick without either rating keeps Claude's score and sorts after rated picks.
+
+## IMDb and Rotten Tomatoes
+
+`Pick.imdb_id` is the IMDb id (`tt0133093`) from TMDB's external ids, for movies and series. Link it as `https://www.imdb.com/title/<imdb_id>/`. It can be absent (older picks, or TMDB has none); clients then link an IMDb search: `https://www.imdb.com/find/?q=<title> <year>`.
+
+`Pick.ratings` is filled for every run (taste runs show it too; only open search ranks by it). Rotten Tomatoes has no id-based URL; link its search: `https://www.rottentomatoes.com/search?search=<title>`.
 
 ## Settings
 

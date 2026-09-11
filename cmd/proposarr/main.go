@@ -107,7 +107,7 @@ func (c *cli) usage(w io.Writer) {
 
 Usage:
   proposarr serve [--listen ADDR]   run the web UI and HTTP API (default :8585)
-  proposarr run --kind movies|series [--vibe TEXT] [--picks N] [--model M] [--effort E] [--json] [--refresh] [--add]
+  proposarr run --kind movies|series [--vibe TEXT] [--no-taste] [--picks N] [--model M] [--effort E] [--json] [--refresh] [--add]
   proposarr add --kind movies|series --tmdb ID [--quality-profile NAME|ID] [--root-folder PATH]
   proposarr check            test every configured connection
   proposarr validate-token   probe the Claude credential with a short model call

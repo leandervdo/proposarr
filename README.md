@@ -10,7 +10,7 @@ Your Plex or Jellyfin watch history is the main taste signal. Claude, run headle
 | Aggregates TMDB "recommended" counts | Candidates are ranked by Claude against a taste profile |
 | No reasoning | Every pick names the library titles it relates to |
 | No memory of ignored titles | Accept, ignore and later verdicts persist per TMDB id |
-| No intent input | Free-text "vibe" per run |
+| No intent input | Free-text "vibe" per run, or an open search by description alone |
 | Movies only | Series and movies |
 
 ## Status
@@ -93,20 +93,20 @@ The listen address, data directory, `claude` binary path and web login can only 
 
 ```sh
 proposarr serve [--listen ADDR]   # web UI and HTTP API
-proposarr run --kind movies|series [--vibe TEXT] [--picks N] [--model M] [--effort E] [--json] [--refresh] [--add]
+proposarr run --kind movies|series [--vibe TEXT] [--no-taste] [--picks N] [--model M] [--effort E] [--json] [--refresh] [--add]
 proposarr add --kind movies|series --tmdb ID [--quality-profile NAME|ID] [--root-folder PATH]
 proposarr check            # test every configured connection
 proposarr validate-token   # probe the Claude credential with a one-line model call
 proposarr version
 ```
 
-Every command accepts `--config PATH`. `run` prints the picks to stdout, or the whole run as JSON with `--json`; progress, warnings and rejected picks go to stderr. `--refresh` ignores the cached library snapshot. `--picks`, `--model` and `--effort` override the per-kind settings for one run.
+Every command accepts `--config PATH`. `run` prints the picks to stdout, or the whole run as JSON with `--json`; progress, warnings and rejected picks go to stderr. `--refresh` ignores the cached library snapshot. `--picks`, `--model` and `--effort` override the per-kind settings for one run. `--no-taste` runs an open search (see below) and needs `--vibe`. Each pick shows its IMDb and Rotten Tomatoes ratings and IMDb link when known.
 
 `check` prints `ok`, `FAIL` or `skip` for Radarr, Sonarr, TMDB, Plex, Jellyfin, the `claude` binary and the Claude credential mode, and exits 1 if anything failed. It makes no model call; `validate-token` does.
 
 ### Web UI and API
 
-`proposarr serve` starts the web UI and the HTTP API on one port (`PROPOSARR_LISTEN`, default `:8585`; `--listen` overrides it). Runs, picks, verdicts and requests are stored in `proposarr.db` under the data directory. Start a run, accept, ignore or postpone picks, and add accepted picks to Sonarr or Radarr from the browser; adding asks for a quality profile for that title, just like the CLI. Titles you accepted, ignored, postponed or added are left out of later runs.
+`proposarr serve` starts the web UI and the HTTP API on one port (`PROPOSARR_LISTEN`, default `:8585`; `--listen` overrides it). Runs, picks, verdicts and requests are stored in `proposarr.db` under the data directory. Start a run, accept, ignore or postpone picks, and add accepted picks to Sonarr or Radarr from the browser; adding asks for a quality profile for that title, just like the CLI. Titles you accepted, ignored, postponed or added are left out of later runs. Turn off **Use my taste** to run an open search instead. Every pick links to its IMDb page and shows its IMDb and Rotten Tomatoes ratings when Radarr or Sonarr know them.
 
 The UI has no login by default. Set `PROPOSARR_WEB_USERNAME` and `PROPOSARR_WEB_PASSWORD` to require HTTP Basic auth, especially if anyone else can reach the port: the UI can add titles to Sonarr and Radarr and start Claude runs. `/healthz` stays open for container health checks.
 
@@ -128,7 +128,11 @@ If the app has several root folders and none is configured (`--root-folder`, or 
 3. **Profile.** Weight titles: rewatched highest, then watched, then partially watched, then owned but unwatched.
 4. **Candidates.** Collect TMDB recommendations (and similar titles for series) for the top profile titles, plus Radarr's discover list for movies. Drop anything already owned or watched.
 5. **Claude.** Run the Claude Code CLI once, headlessly. It gets no built-in tools, gets the profile and candidates in the prompt, and must return JSON that matches a schema.
-6. **Verify.** Check every pick by TMDB id against the library and history. Resolve picks from outside the candidate list through TMDB search, and drop any that don't resolve.
+6. **Verify.** Check every pick by TMDB id against the library and history. Resolve picks from outside the candidate list through TMDB search, and drop any that don't resolve. Look up each pick's IMDb id (TMDB) and IMDb, Rotten Tomatoes and Metacritic ratings (Radarr; Sonarr only has IMDb).
+
+### Open search
+
+An open search (**Use my taste** off in the UI, `--no-taste` on the CLI) ignores your taste. You describe what you want ("90s heist movies with a twist ending"), and Claude suggests matching titles from that description alone. No watch history, taste profile or candidate list is used. Titles you own, accepted, ignored, postponed or requested are still left out. Every suggestion is resolved on TMDB like a free pick. Picks are ranked by real ratings, the mean of IMDb × 10 (with at least 1,000 votes) and the Rotten Tomatoes critic score. Picks without either rating come last, in Claude's order.
 
 ## Claude authentication
 

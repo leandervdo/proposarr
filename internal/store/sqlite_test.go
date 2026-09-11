@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -83,6 +84,82 @@ func TestReopenMigratesOnceAndMarksInterrupted(t *testing.T) {
 	if r.Status != RunFailed || r.Error != "interrupted: server restarted" || r.FinishedAt == nil || r.Vibe != "cosy" {
 		t.Errorf("interrupted run = %+v", r)
 	}
+}
+
+func TestMigrateFromV2(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "proposarr.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmts := []string{`CREATE TABLE schema_version (version INTEGER NOT NULL)`}
+	for i, m := range migrations[:2] {
+		stmts = append(stmts, m...)
+		stmts = append(stmts, fmt.Sprintf(`INSERT INTO schema_version (version) VALUES (%d)`, i+1))
+	}
+	stmts = append(stmts,
+		`INSERT INTO runs (kind, vibe, status, started_at, finished_at) VALUES ('movies', 'old', 'succeeded', '2026-01-01T00:00:00.000000000Z', '2026-01-01T00:01:00.000000000Z')`,
+		`INSERT INTO picks (run_id, tmdb_id, kind, title, score) VALUES (1, 603, 'movies', 'The Matrix', 90)`,
+		`INSERT INTO settings (key, value, updated_at) VALUES ('movies.picks', '12', '2026-01-01T00:00:00.000000000Z')`,
+	)
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	db.Close()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("upgrade: %v", err)
+	}
+	defer s.Close()
+	var version int
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != 3 {
+		t.Fatalf("version = %d, %v", version, err)
+	}
+	old, picks, err := s.GetRun(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !old.UseTaste || old.Vibe != "old" || len(picks) != 1 || picks[0].Title != "The Matrix" || picks[0].IMDBID != "" || picks[0].Ratings != nil {
+		t.Errorf("old run = %+v picks = %+v", old, picks)
+	}
+	if st, err := s.Settings(ctx); err != nil || len(st) != 1 || st[0].Value != "12" {
+		t.Errorf("settings = %+v, %v", st, err)
+	}
+
+	search, err := s.CreateRun(ctx, Run{Kind: media.Series, Vibe: "short Korean thrillers", UseTaste: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	taste, err := s.CreateRun(ctx, Run{Kind: media.Movies, UseTaste: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk := pipeline.Pick{TMDBID: 95396, IMDBID: "tt11280740", Kind: media.Series, Title: "Severance", Score: 87, Source: "free",
+		RelatedTo: []string{}, Genres: []string{}, Streaming: []string{},
+		Ratings: &pipeline.Ratings{IMDB: &pipeline.IMDBRating{Value: 8.7, Votes: 300000}}}
+	if err := s.FinishRun(ctx, search, &pipeline.Run{Kind: media.Series, OpenSearch: true, Picks: []pipeline.Pick{pk}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	r, got, err := s.GetRun(ctx, search)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.UseTaste || r.Status != RunSucceeded || r.Profile != nil || len(got) != 1 || !reflect.DeepEqual(got[0].Pick, pk) {
+		t.Errorf("open search run = %+v picks = %+v", r, got)
+	}
+	runs, err := s.ListRuns(ctx, 10)
+	if err != nil || len(runs) != 3 {
+		t.Fatalf("ListRuns = %+v, %v", runs, err)
+	}
+	for _, run := range runs {
+		if want := run.ID != search; run.UseTaste != want {
+			t.Errorf("run %d use_taste = %v, want %v", run.ID, run.UseTaste, want)
+		}
+	}
+	_ = taste
 }
 
 func TestFinishRunSucceeded(t *testing.T) {
@@ -169,10 +246,11 @@ func TestFinishRunFailures(t *testing.T) {
 func TestPickRoundTrip(t *testing.T) {
 	s, _ := openTest(t)
 	full := pipeline.Pick{
-		TMDBID: 329865, Kind: media.Movies, Title: "Arrival", Year: 2016, Reason: "Like Interstellar",
+		TMDBID: 329865, IMDBID: "tt2543164", Kind: media.Movies, Title: "Arrival", Year: 2016, Reason: "Like Interstellar",
 		RelatedTo: []string{"Interstellar (2014)"}, Score: 92, Source: "free", Overview: "Linguist meets aliens",
 		Genres: []string{"Drama", "Science Fiction"}, Rating: 7.6, Streaming: []string{"Netflix"},
 		PosterURL: "https://image.tmdb.org/t/p/w500/x.jpg",
+		Ratings:   &pipeline.Ratings{IMDB: &pipeline.IMDBRating{Value: 7.9, Votes: 850000}, RottenTomatoes: 94, Metacritic: 81},
 	}
 	bare := pipeline.Pick{TMDBID: 2, Title: "Bare", Score: 10}
 	runID := finishedRun(t, s, media.Movies, full, bare)
@@ -186,6 +264,9 @@ func TestPickRoundTrip(t *testing.T) {
 	}
 	if picks[1].RelatedTo == nil || picks[1].Genres == nil || picks[1].Streaming == nil {
 		t.Errorf("empty slices must be non-nil: %+v", picks[1].Pick)
+	}
+	if picks[1].Ratings != nil || picks[1].IMDBID != "" {
+		t.Errorf("bare pick ratings %+v imdb %q", picks[1].Ratings, picks[1].IMDBID)
 	}
 
 	got, err := s.GetPick(ctx, picks[0].ID)

@@ -245,11 +245,11 @@ func newEnv(t *testing.T, mutate func(o *Options)) *testEnv {
 				Picks: []pipeline.Pick{{TMDBID: 329865, Kind: media.Movies, Title: "Arrival", Year: 2016, Score: 92}},
 			}}
 		},
-		RunRequest: func(kind media.Kind, vibe string) (pipeline.Request, error) {
+		RunRequest: func(kind media.Kind, vibe string, useTaste bool) (pipeline.Request, error) {
 			if kind == media.Series {
 				return pipeline.Request{}, errors.New("a series run needs PROPOSARR_SONARR_URL (sonarr.url)")
 			}
-			return pipeline.Request{Kind: kind, Vibe: vibe, Model: "claude-sonnet-5", Effort: "medium"}, nil
+			return pipeline.Request{Kind: kind, Vibe: vibe, OpenSearch: !useTaste, Model: "claude-sonnet-5", Effort: "medium"}, nil
 		},
 		Adder: env.adder,
 		App: func(app string) (AppCatalog, string, bool) {
@@ -484,6 +484,76 @@ func TestCreateRunErrors(t *testing.T) {
 	}
 	// A failed start must not leave the kind marked as running.
 	wantStatus(t, env.do(t, "POST", "/api/runs", `{"kind":"series"}`), http.StatusBadRequest)
+}
+
+type runnerFunc func(ctx context.Context, req pipeline.Request) (*pipeline.Run, error)
+
+func (f runnerFunc) Run(ctx context.Context, req pipeline.Request) (*pipeline.Run, error) {
+	return f(ctx, req)
+}
+
+func TestCreateRunUseTaste(t *testing.T) {
+	reqs := make(chan pipeline.Request, 1)
+	env := newEnv(t, func(o *Options) {
+		o.NewRunner = func(func(string)) Runner {
+			return runnerFunc(func(_ context.Context, req pipeline.Request) (*pipeline.Run, error) {
+				reqs <- req
+				return &pipeline.Run{Kind: req.Kind, OpenSearch: req.OpenSearch}, nil
+			})
+		}
+	})
+	events, unsubscribe := env.srv.events.subscribe()
+	defer unsubscribe()
+
+	start := func(body string) (store.Run, pipeline.Request, string) {
+		t.Helper()
+		rec := env.do(t, "POST", "/api/runs", body)
+		wantStatus(t, rec, http.StatusAccepted)
+		var req pipeline.Request
+		select {
+		case req = <-reqs:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: runner not called", body)
+		}
+		for ev := range events {
+			if ev.name == "run.finished" {
+				break
+			}
+		}
+		return decode[store.Run](t, rec), req, rec.Body.String()
+	}
+
+	run, req, raw := start(`{"kind":"movies","vibe":"cosy"}`)
+	if !run.UseTaste || req.OpenSearch || !strings.Contains(raw, `"use_taste":true`) {
+		t.Errorf("default: run %+v open %v body %s", run, req.OpenSearch, raw)
+	}
+	run, req, _ = start(`{"kind":"movies","use_taste":true}`)
+	if !run.UseTaste || req.OpenSearch {
+		t.Errorf("use_taste true: run %+v open %v", run, req.OpenSearch)
+	}
+
+	for _, body := range []string{`{"kind":"movies","use_taste":false}`, `{"kind":"movies","use_taste":false,"vibe":"   "}`} {
+		rec := env.do(t, "POST", "/api/runs", body)
+		wantStatus(t, rec, http.StatusBadRequest)
+		if got := decode[map[string]string](t, rec)["error"]; got != "describe what you are looking for" {
+			t.Errorf("%s: error = %q", body, got)
+		}
+	}
+	env.store.mu.Lock()
+	created := len(env.store.runs)
+	env.store.mu.Unlock()
+	if created != 2 {
+		t.Fatalf("runs created = %d, want 2 (rejected searches must not create runs)", created)
+	}
+
+	run, req, raw = start(`{"kind":"movies","use_taste":false,"vibe":"  short Korean thrillers "}`)
+	if run.UseTaste || !req.OpenSearch || req.Vibe != "short Korean thrillers" || !strings.Contains(raw, `"use_taste":false`) {
+		t.Errorf("open search: run %+v req %+v body %s", run, req, raw)
+	}
+	stored, _, err := env.store.GetRun(context.Background(), run.ID)
+	if err != nil || stored.UseTaste {
+		t.Errorf("stored run = %+v, %v", stored, err)
+	}
 }
 
 func TestSSEDeliversProgress(t *testing.T) {

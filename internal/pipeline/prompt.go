@@ -3,6 +3,7 @@ package pipeline
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -39,10 +40,6 @@ func userPrompt(req Request, prof profile.Profile, cands []candidates.Candidate)
 	if v := strings.TrimSpace(req.Vibe); v != "" {
 		fmt.Fprintf(&b, " Try to match this specific vibe/mood: %q.", v)
 	}
-	fifth := "Consider both classic and recent releases that have stood the test of time"
-	if req.Kind == media.Series {
-		fifth = "Focus on complete or ongoing shows with consistent quality, not canceled after 1-2 seasons"
-	}
 	fmt.Fprintf(&b, `
 
 Prioritize %s that match these criteria:
@@ -51,7 +48,7 @@ Prioritize %s that match these criteria:
 3. Diverse in content (not just the most obvious recommendations)
 4. Include a mix of both popular and lesser-known hidden gems
 5. %s
-`, noun, fifth)
+`, noun, fifthCriterion(req.Kind))
 
 	b.WriteString("\n## Taste profile\n")
 	b.WriteString("Weights: rewatched 4, watched 3, partially watched 1, owned but unwatched 0.5.\n")
@@ -97,6 +94,72 @@ Prioritize %s that match these criteria:
 - reason is one sentence naming what the %s shares with those titles.
 - score is 0-100. Silently calculate it by privately considering ratings from IMDb, Rotten Tomatoes, Metacritic and audience ratings. Do not cite any rating source in the reason.
 `, singular(req.Kind))
+	return b.String()
+}
+
+func fifthCriterion(k media.Kind) string {
+	if k == media.Series {
+		return "Focus on complete or ongoing shows with consistent quality, not canceled after 1-2 seasons"
+	}
+	return "Consider both classic and recent releases that have stood the test of time"
+}
+
+const maxSearchSuggestions = 50
+
+// searchCount is how many suggestions an open search asks for, so that rejects
+// and rating-based ranking still leave enough picks.
+func searchCount(picks int) int { return min(picks*2, maxSearchSuggestions) }
+
+func searchSystemPrompt(kind media.Kind) string {
+	noun := kind.Noun()
+	return fmt.Sprintf(`You are a %s search assistant. You find titles that match the user's description, leaving out titles they already have. You MUST adhere to these CRITICAL rules:
+
+1. NEVER recommend %s that are in the user's library or any exclusion list provided
+2. Only recommend %s that truly match the user's request, including every explicit constraint such as decade, country, language or genre
+3. VERIFY each recommendation against these rules before returning it
+4. Return only the structured output, no extra text`, singular(kind), noun, noun)
+}
+
+// searchPrompt asks for n titles matching req.Vibe, listing owned titles
+// (most recently added first, at most req.TopTitles) so they are avoided.
+func searchPrompt(req Request, lib []media.Title, n int) string {
+	noun := req.Kind.Noun()
+	var b strings.Builder
+	fmt.Fprintf(&b, "Recommend %d %s that match this request: %q. Be brief and direct.", n, noun, strings.TrimSpace(req.Vibe))
+	fmt.Fprintf(&b, `
+
+Prioritize %s that match these criteria:
+1. Satisfies every explicit constraint in the request (decade or years, country, language, genre, length). These are hard requirements: never stretch them to fill the list
+2. Highest overall quality and critical acclaim
+3. Diverse in content (not just the most obvious recommendations)
+4. A mix of popular titles and lesser-known hidden gems
+5. %s
+`, noun, fifthCriterion(req.Kind))
+
+	b.WriteString("\n## Titles I already have — do not suggest these\n")
+	owned := append([]media.Title(nil), lib...)
+	sort.SliceStable(owned, func(i, j int) bool { return owned[i].Added.After(owned[j].Added) })
+	if len(owned) == 0 {
+		b.WriteString("(none)\n")
+	}
+	for i, t := range owned {
+		if i == req.TopTitles {
+			fmt.Fprintf(&b, "(and %d more)\n", len(owned)-i)
+			break
+		}
+		fmt.Fprintf(&b, "- %s\n", t.Label())
+	}
+
+	one := singular(req.Kind)
+	fmt.Fprintf(&b, `
+## Rules
+- You MUST NOT recommend any title from the list above.
+- Focus on how closely each %s matches the request and on its quality. The final order comes from real IMDb and Rotten Tomatoes ratings.
+- Use source "free". Give the TMDB id only if you are certain, otherwise 0 — every title is resolved by title and year.
+- related_to is an empty array.
+- reason is one sentence on how the %s matches the request.
+- score is 0-100 and means how well the %s fits the request, not how good it is: 90 or more fits every part of it, below 70 misses a requirement (for example the wrong decade). Return fewer titles rather than titles you would score below 70.
+`, one, one, one)
 	return b.String()
 }
 
