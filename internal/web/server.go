@@ -52,8 +52,11 @@ type CheckResult struct {
 // Options wires the server to its ports. Nil functions disable their routes.
 type Options struct {
 	Version string
-	Config  config.Config // API keys already resolved; secrets never leave the server
-	Store   store.Store
+	// Config returns the current effective settings (API keys already resolved);
+	// it changes when settings are saved. Secrets never leave the server.
+	Config   func() config.Config
+	Settings SettingsService
+	Store    store.Store
 
 	NewRunner  func(progress func(string)) Runner
 	RunRequest func(kind media.Kind, vibe string) (pipeline.Request, error)
@@ -103,6 +106,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/status", s.status)
 	mux.HandleFunc("GET /api/connections/check", s.checkConnections)
 	mux.HandleFunc("GET /api/config", s.config)
+	mux.HandleFunc("GET /api/settings", s.getSettings)
+	mux.HandleFunc("PUT /api/settings", s.putSettings)
+	mux.HandleFunc("POST /api/settings/test", s.testSettings)
 	mux.HandleFunc("GET /api/runs", s.listRuns)
 	mux.HandleFunc("GET /api/runs/{id}", s.getRun)
 	mux.HandleFunc("POST /api/runs", s.createRun)
@@ -129,8 +135,18 @@ func (s *Server) Shutdown() {
 	s.events.close()
 }
 
+// cfg is the current effective configuration.
+func (s *Server) cfg() config.Config {
+	if s.o.Config == nil {
+		return config.Default()
+	}
+	return s.o.Config()
+}
+
+// auth reads the web login once: it is file/environment only, not UI-editable.
 func (s *Server) auth(next http.Handler) http.Handler {
-	user, pass := s.o.Config.Web.Username, s.o.Config.Web.Password
+	web := s.cfg().Web
+	user, pass := web.Username, web.Password
 	if user == "" || pass == "" {
 		return next
 	}

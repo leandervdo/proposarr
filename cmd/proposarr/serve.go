@@ -9,11 +9,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/leandervdo/proposarr/internal/config"
 	"github.com/leandervdo/proposarr/internal/media"
 	"github.com/leandervdo/proposarr/internal/pipeline"
+	"github.com/leandervdo/proposarr/internal/request"
+	"github.com/leandervdo/proposarr/internal/settings"
 	"github.com/leandervdo/proposarr/internal/store"
 	"github.com/leandervdo/proposarr/internal/web"
 	ui "github.com/leandervdo/proposarr/web"
@@ -25,30 +28,49 @@ func (c *cli) serveCmd(ctx context.Context, args []string) error {
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	cfg, err := c.loadConfig(*cfgPath)
+	path, err := resolveConfigPath(*cfgPath, c.getenv)
 	if err != nil {
 		return err
 	}
-	if *listen != "" {
-		cfg.Listen = *listen
-	}
-	if _, _, err := cfg.Claude.Auth(); err != nil {
+	// The file and environment decide where the data lives; everything else can
+	// come from the web UI.
+	boot, err := config.Load(path, c.getenv)
+	if err != nil {
 		return err
 	}
 	log := slog.New(slog.NewTextHandler(c.stderr, nil))
-	c.resolveAPIKeys(ctx, &cfg, media.Movies, media.Series)
 
-	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
+	if err := os.MkdirAll(boot.DataDir, 0o700); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
-	st, err := store.Open(filepath.Join(cfg.DataDir, "proposarr.db"))
+	st, err := store.Open(filepath.Join(boot.DataDir, "proposarr.db"))
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
 	defer st.Close()
+	key, err := settings.LoadKey(boot.DataDir, c.getenv, true)
+	if err != nil {
+		return err
+	}
+	ciph, err := settings.NewCipher(key)
+	if err != nil {
+		return err
+	}
+	svc := settings.NewService(settings.Options{ConfigPath: path, Getenv: c.getenv, Backend: st, Cipher: ciph, Logger: log})
+	rt := newRuntime(svc, log, *listen)
+	if err := rt.reload(ctx); err != nil {
+		return err
+	}
+	cur := rt.state()
+	if _, _, err := cur.cfg.Claude.Auth(); err != nil {
+		log.Warn("Claude credentials", "err", err)
+	}
+	if missing := settings.Missing(cur.cfg); len(missing) > 0 {
+		log.Info("setup required: open the web UI to configure Proposarr", "missing", strings.Join(missing, ", "))
+	}
 
-	ws := web.New(serverOptions(cfg, buildDeps(cfg), st, log))
-	ln, err := net.Listen("tcp", cfg.Listen)
+	ws := web.New(serverOptions(rt, st, log))
+	ln, err := net.Listen("tcp", cur.cfg.Listen)
 	if err != nil {
 		return err
 	}
@@ -57,7 +79,7 @@ func (c *cli) serveCmd(ctx context.Context, args []string) error {
 	srv.RegisterOnShutdown(ws.CloseEvents)
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
-	log.Info("proposarr listening", "addr", ln.Addr().String(), "version", version, "web_auth", cfg.Web.AuthEnabled())
+	log.Info("proposarr listening", "addr", ln.Addr().String(), "version", version, "web_auth", cur.cfg.Web.AuthEnabled())
 
 	select {
 	case <-ctx.Done():
@@ -76,46 +98,59 @@ func (c *cli) serveCmd(ctx context.Context, args []string) error {
 	return shutdownErr
 }
 
-// serverOptions wires the web server to the same adapters the CLI uses.
-func serverOptions(cfg config.Config, d *deps, st store.Store, log *slog.Logger) web.Options {
-	req := d.requester()
-	// The web chooser applies the root folder from the request, else the configured one.
-	req.RadarrRootFolder, req.SonarrRootFolder = "", ""
+// serverOptions wires the web server to the runtime's current adapters, the
+// same ones the CLI uses. Every call reads the latest state.
+func serverOptions(rt *runtime, st store.Store, log *slog.Logger) web.Options {
 	return web.Options{
-		Version: version,
-		Config:  cfg,
-		Store:   st,
-		UI:      ui.Dist(),
-		Logger:  log,
+		Version:  version,
+		Config:   func() config.Config { return rt.state().cfg },
+		Settings: rt,
+		Store:    st,
+		UI:       ui.Dist(),
+		Logger:   log,
 		NewRunner: func(progress func(string)) web.Runner {
-			return d.pipeline(false, progress, st)
+			return rt.state().deps.pipeline(false, progress, st)
 		},
 		RunRequest: func(kind media.Kind, vibe string) (pipeline.Request, error) {
-			missing := append(requireTMDB(cfg), requireApp(cfg, kind)...)
+			s := rt.state()
+			missing := append(requireTMDB(s.cfg), requireApp(s.cfg, kind)...)
 			if err := missingError("a "+string(kind)+" run", missing); err != nil {
 				return pipeline.Request{}, err
 			}
-			env, _, err := d.agentEnv()
+			env, _, err := s.deps.agentEnv()
 			if err != nil {
 				return pipeline.Request{}, err
 			}
-			return runRequest(cfg, kind, vibe, env), nil
+			return runRequest(s.cfg, kind, vibe, env), nil
 		},
-		Adder: req,
+		Adder: adderFunc(func(ctx context.Context, item request.Item, ch request.Chooser) (request.Result, error) {
+			req := rt.state().deps.requester()
+			// The web chooser applies the root folder from the request, else the configured one.
+			req.RadarrRootFolder, req.SonarrRootFolder = "", ""
+			return req.Add(ctx, item, ch)
+		}),
 		App: func(app string) (web.AppCatalog, string, bool) {
+			s := rt.state()
 			switch {
-			case app == "radarr" && d.radarr != nil:
-				return d.radarr, cfg.Radarr.RootFolder, true
-			case app == "sonarr" && d.sonarr != nil:
-				return d.sonarr, cfg.Sonarr.RootFolder, true
+			case app == "radarr" && s.deps.radarr != nil:
+				return s.deps.radarr, s.cfg.Radarr.RootFolder, true
+			case app == "sonarr" && s.deps.sonarr != nil:
+				return s.deps.sonarr, s.cfg.Sonarr.RootFolder, true
 			}
 			return nil, "", false
 		},
 		Library: func(ctx context.Context, kind media.Kind) ([]media.Title, error) {
-			return d.library(false).Titles(ctx, kind)
+			return rt.state().deps.library(false).Titles(ctx, kind)
 		},
 		Check: func(ctx context.Context) []web.CheckResult {
-			return runChecks(ctx, cfg, d)
+			s := rt.state()
+			return runChecks(ctx, s.cfg, s.deps)
 		},
 	}
+}
+
+type adderFunc func(ctx context.Context, item request.Item, ch request.Chooser) (request.Result, error)
+
+func (f adderFunc) Add(ctx context.Context, item request.Item, ch request.Chooser) (request.Result, error) {
+	return f(ctx, item, ch)
 }

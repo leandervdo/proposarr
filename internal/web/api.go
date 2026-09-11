@@ -14,14 +14,18 @@ import (
 	"github.com/leandervdo/proposarr/internal/media"
 	"github.com/leandervdo/proposarr/internal/pipeline"
 	"github.com/leandervdo/proposarr/internal/request"
+	"github.com/leandervdo/proposarr/internal/settings"
 	"github.com/leandervdo/proposarr/internal/store"
 )
 
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
-	cfg := s.o.Config
+	cfg := s.cfg()
+	missing := settings.Missing(cfg)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":     s.o.Version,
-		"claude_auth": claudeAuth(cfg),
+		"version":        s.o.Version,
+		"setup_required": len(missing) > 0,
+		"missing":        missing,
+		"claude_auth":    claudeAuth(cfg),
 		"connections": map[string]bool{
 			"radarr":   cfg.Radarr.Configured(),
 			"sonarr":   cfg.Sonarr.Configured(),
@@ -57,7 +61,7 @@ func (s *Server) checkConnections(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) config(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, publicConfigOf(s.o.Config))
+	writeJSON(w, http.StatusOK, publicConfigOf(s.cfg()))
 }
 
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
@@ -346,9 +350,10 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	arrCfg := s.o.Config.Radarr
+	cfg := s.cfg()
+	arrCfg := cfg.Radarr
 	if kind == media.Series {
-		arrCfg = s.o.Config.Sonarr
+		arrCfg = cfg.Sonarr
 	}
 	if s.o.Library == nil || !arrCfg.Configured() {
 		writeError(w, http.StatusBadRequest, kind.App()+" is not configured")

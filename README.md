@@ -50,13 +50,20 @@ go build ./cmd/proposarr
 
 ## Configuration
 
-Configure Proposarr with a YAML file, environment variables, or both. Environment variables override the file. The file is read from `--config PATH`, else `PROPOSARR_CONFIG` (both must point to an existing file), else `./proposarr.yaml` if it exists. See [`proposarr.example.yaml`](proposarr.example.yaml) for every key.
+The normal way to configure Proposarr is the web UI: start `proposarr serve`, open it, and enter Radarr, Sonarr, Plex or Jellyfin, TMDB and the Claude credential under Connections and Settings. Each connection has a Test button, and saved settings apply immediately, without a restart. They are stored in `proposarr.db` in the data directory; API keys and tokens are encrypted there (AES-256-GCM) and are never sent back to the browser.
+
+A YAML file and environment variables are optional overrides, for people who prefer to configure everything up front. Precedence, lowest to highest: built-in default, web UI, config file, environment variable. A setting that the file or an environment variable provides is shown in the UI as locked, with the name of the variable, and can only be changed there. The file is read from `--config PATH`, else `PROPOSARR_CONFIG` (both must point to an existing file), else `./proposarr.yaml` if it exists. See [`proposarr.example.yaml`](proposarr.example.yaml) for every key.
+
+CLI commands (`run`, `add`, `check`, `validate-token`) use the settings saved in the UI too, whenever `proposarr.db` exists in the data directory, with the same precedence.
+
+The listen address, data directory, `claude` binary path and web login can only be set in the file or the environment.
 
 | Variable | Default | Notes |
 |---|---|---|
 | `PROPOSARR_LISTEN` | `:8585` | Address `proposarr serve` listens on |
 | `PROPOSARR_WEB_USERNAME`, `PROPOSARR_WEB_PASSWORD` | | Optional HTTP Basic login for the web UI and API. Set both or neither |
 | `PROPOSARR_DATA_DIR` | `data` | Snapshot cache, SQLite database and run data |
+| `PROPOSARR_SECRET_KEY` | | Key for secrets saved from the UI: base64 or hex of 32 bytes, or any passphrase. When unset, a random key is created once in `<data dir>/secret.key`; keep that file with the database |
 | `PROPOSARR_HISTORY_DAYS` | `180` | Watch-history window |
 | `PROPOSARR_SNAPSHOT_TTL` | `6h` | Library snapshot lifetime |
 | `PROPOSARR_SONARR_URL`, `PROPOSARR_SONARR_API_KEY` | | URL required for series. API key optional, see below |
@@ -140,23 +147,20 @@ Anthropic's terms cover Claude Code. Whether a scheduled, headless Claude Code r
 
 Images for `linux/amd64` and `linux/arm64` are published as [`leander1999/proposarr`](https://hub.docker.com/r/leander1999/proposarr). The image bundles Proposarr and the Claude Code CLI, and works with any Sonarr and Radarr install it can reach over the network.
 
+Only the port and a volume are needed:
+
 ```sh
 docker run -d --name proposarr \
-  --user 1000:1000 \
   -p 8585:8585 \
   -v /path/to/proposarr:/config \
-  -e CLAUDE_CODE_OAUTH_TOKEN=... \
-  -e PROPOSARR_TMDB_API_KEY=... \
-  -e PROPOSARR_RADARR_URL=http://radarr:7878 \
-  -e PROPOSARR_RADARR_API_KEY=... \
   leander1999/proposarr:latest
 ```
 
-See [`docker-compose.example.yml`](docker-compose.example.yml) for a compose file.
+Then open `http://<host>:8585` and fill in the connections in the web UI. See [`docker-compose.example.yml`](docker-compose.example.yml) for a compose file.
 
-- **User.** The container runs as uid 1000. Use `--user` (or `user:` in compose) to match the owner of the directory you mount at `/config`.
-- **Config.** `/config/proposarr.yaml` is picked up automatically, or use the environment variables above. The library cache and the Claude CLI's own state also live under `/config`.
-- **Claude authentication.** The container cannot use the login of the `claude` CLI on your desktop. Set `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or `ANTHROPIC_API_KEY`.
+- **User.** Set `PUID` and `PGID` to the owner of the directory you mount at `/config` (default 1000; 99 and 100 on Unraid).
+- **Config.** Settings entered in the UI, the database and the generated `secret.key` live under `/config/data`. Environment variables (see the table above) or `/config/proposarr.yaml` are optional; anything they set is locked in the UI. The library cache and the Claude CLI's own state also live under `/config`.
+- **Claude authentication.** The container cannot use the login of the `claude` CLI on your desktop. Create a token with `claude setup-token` and enter it in the UI (or set `CLAUDE_CODE_OAUTH_TOKEN`), or use an Anthropic API key.
 - **Network.** Sonarr, Radarr, Plex and Jellyfin URLs must be reachable from inside the container: use the service name when they share a Docker network (`http://radarr:7878`), or a LAN address. `localhost` inside the container is the container itself.
 - **Web UI.** The container runs `proposarr serve` on port 8585. Publish it with `-p 8585:8585` and open `http://<host>:8585`.
 - **Running commands.** CLI commands also work inside the running container:

@@ -93,6 +93,14 @@ var migrations = [][]string{
 		)`,
 		`CREATE INDEX requests_pick ON requests(pick_id, id)`,
 	},
+	{
+		`CREATE TABLE settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL,
+			secret INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL
+		)`,
+	},
 }
 
 // SQLite is the Store backed by a single SQLite file.

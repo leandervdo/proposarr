@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/leandervdo/proposarr/internal/agent"
@@ -146,8 +147,32 @@ func (d *deps) agentEnv() ([]string, string, error) {
 // resolveAPIKeys fills an empty Sonarr/Radarr api_key from the app's
 // /initialize.json. A failure leaves the key empty, so requireApp reports it.
 func (c *cli) resolveAPIKeys(ctx context.Context, cfg *config.Config, kinds ...media.Kind) {
-	hc := &http.Client{Timeout: 10 * time.Second}
-	for _, k := range kinds {
+	for _, d := range discoverAPIKeys(ctx, cfg, &http.Client{Timeout: 10 * time.Second}, kinds...) {
+		url := cfg.Radarr.URL
+		if d.kind == media.Series {
+			url = cfg.Sonarr.URL
+		}
+		if d.err != nil {
+			fmt.Fprintf(c.stderr, "note: %s api_key is not set and could not be read: %v\n", d.kind.App(), d.err)
+			continue
+		}
+		fmt.Fprintf(c.stderr, "note: %s api_key is not set; using the key from %s/initialize.json\n", d.kind.App(), url)
+	}
+}
+
+type keyDiscovery struct {
+	kind media.Kind
+	err  error
+}
+
+// discoverAPIKeys reads empty Sonarr/Radarr API keys from /initialize.json,
+// concurrently, and reports every app it tried.
+func discoverAPIKeys(ctx context.Context, cfg *config.Config, hc *http.Client, kinds ...media.Kind) []keyDiscovery {
+	var (
+		wg  sync.WaitGroup
+		out = make([]*keyDiscovery, len(kinds))
+	)
+	for i, k := range kinds {
 		a := &cfg.Radarr
 		if k == media.Series {
 			a = &cfg.Sonarr
@@ -155,14 +180,28 @@ func (c *cli) resolveAPIKeys(ctx context.Context, cfg *config.Config, kinds ...m
 		if a.URL == "" || a.APIKey != "" {
 			continue
 		}
-		key, err := arr.FetchAPIKey(ctx, a.URL, hc)
-		if err != nil {
-			fmt.Fprintf(c.stderr, "note: %s api_key is not set and could not be read: %v\n", k.App(), err)
-			continue
-		}
-		a.APIKey = key
-		fmt.Fprintf(c.stderr, "note: %s api_key is not set; using the key from %s/initialize.json\n", k.App(), a.URL)
+		out[i] = &keyDiscovery{kind: k}
+		wg.Add(1)
+		go func(a *config.Arr, d *keyDiscovery) {
+			defer wg.Done()
+			dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			key, err := arr.FetchAPIKey(dctx, a.URL, hc)
+			if err != nil {
+				d.err = err
+				return
+			}
+			a.APIKey = key
+		}(a, out[i])
 	}
+	wg.Wait()
+	var res []keyDiscovery
+	for _, d := range out {
+		if d != nil {
+			res = append(res, *d)
+		}
+	}
+	return res
 }
 
 // requireApp reports the missing settings for the kind's *arr app.

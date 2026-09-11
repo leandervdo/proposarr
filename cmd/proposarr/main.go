@@ -9,10 +9,13 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/leandervdo/proposarr/internal/config"
 	"github.com/leandervdo/proposarr/internal/media"
+	"github.com/leandervdo/proposarr/internal/settings"
+	"github.com/leandervdo/proposarr/internal/store"
 )
 
 var version = "dev"
@@ -172,5 +175,41 @@ func (c *cli) loadConfig(flagPath string) (config.Config, error) {
 	if err != nil {
 		return config.Config{}, err
 	}
-	return config.Load(path, c.getenv)
+	cfg, err := config.Load(path, c.getenv)
+	if err != nil {
+		return cfg, err
+	}
+	return c.withSavedSettings(path, cfg)
+}
+
+// withSavedSettings layers the settings saved in the web UI under the file and
+// environment, when the server's database exists in the data dir, so CLI
+// commands behave like the UI.
+func (c *cli) withSavedSettings(path string, cfg config.Config) (config.Config, error) {
+	db := filepath.Join(cfg.DataDir, "proposarr.db")
+	if _, err := os.Stat(db); err != nil {
+		return cfg, nil
+	}
+	ctx := context.Background()
+	rows, err := store.LoadSettingsFile(ctx, db)
+	if err != nil {
+		fmt.Fprintf(c.stderr, "warning: settings saved in the web UI were not applied: %v\n", err)
+		return cfg, nil
+	}
+	if len(rows) == 0 {
+		return cfg, nil
+	}
+	var ciph *settings.Cipher
+	if key, err := settings.LoadKey(cfg.DataDir, c.getenv, false); err == nil {
+		ciph, _ = settings.NewCipher(key)
+	}
+	svc := settings.NewService(settings.Options{ConfigPath: path, Getenv: c.getenv, Backend: settings.StaticBackend(rows), Cipher: ciph})
+	res, err := svc.Resolve(ctx)
+	if err != nil {
+		return cfg, err
+	}
+	for _, key := range res.Undecryptable() {
+		fmt.Fprintf(c.stderr, "warning: saved %s could not be decrypted; enter it again in the web UI\n", key)
+	}
+	return res.Config, nil
 }

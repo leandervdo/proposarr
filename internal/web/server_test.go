@@ -237,7 +237,7 @@ func newEnv(t *testing.T, mutate func(o *Options)) *testEnv {
 	cfg.TMDB.APIKey = "tmdb-secret-key"
 	o := Options{
 		Version: "test",
-		Config:  cfg,
+		Config:  func() config.Config { return cfg },
 		Store:   env.store,
 		NewRunner: func(progress func(string)) Runner {
 			return &fakeRunner{progress: progress, release: env.release, run: &pipeline.Run{
@@ -281,6 +281,13 @@ func newEnv(t *testing.T, mutate func(o *Options)) *testEnv {
 	return env
 }
 
+// withConfig changes the configuration the server under test sees.
+func withConfig(o *Options, change func(*config.Config)) {
+	c := o.Config()
+	change(&c)
+	o.Config = func() config.Config { return c }
+}
+
 func (e *testEnv) do(t *testing.T, method, target, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
@@ -306,7 +313,9 @@ func wantStatus(t *testing.T, rec *httptest.ResponseRecorder, code int) {
 }
 
 func TestHealthzAndSecurityHeaders(t *testing.T) {
-	env := newEnv(t, func(o *Options) { o.Config.Web = config.Web{Username: "admin", Password: "pw"} })
+	env := newEnv(t, func(o *Options) {
+		withConfig(o, func(c *config.Config) { c.Web = config.Web{Username: "admin", Password: "pw"} })
+	})
 	rec := env.do(t, "GET", "/healthz", "")
 	wantStatus(t, rec, http.StatusOK)
 	if rec.Body.String() != "ok" {
@@ -320,7 +329,9 @@ func TestHealthzAndSecurityHeaders(t *testing.T) {
 }
 
 func TestBasicAuth(t *testing.T) {
-	env := newEnv(t, func(o *Options) { o.Config.Web = config.Web{Username: "admin", Password: "pw"} })
+	env := newEnv(t, func(o *Options) {
+		withConfig(o, func(c *config.Config) { c.Web = config.Web{Username: "admin", Password: "pw"} })
+	})
 	for _, target := range []string{"/api/status", "/", "/api/events"} {
 		rec := env.do(t, "GET", target, "")
 		wantStatus(t, rec, http.StatusUnauthorized)
@@ -362,9 +373,11 @@ func TestStatus(t *testing.T) {
 
 func TestConfigHasNoSecrets(t *testing.T) {
 	env := newEnv(t, func(o *Options) {
-		o.Config.Plex = config.Plex{URL: "http://user:plexpass@plex:32400?X-Plex-Token=plex-secret-token", Token: "plex-secret-token"}
-		o.Config.Claude.OAuthToken = "sk-ant-oat-secret"
-		o.Config.Web = config.Web{Username: "admin", Password: "web-secret-pass"}
+		withConfig(o, func(c *config.Config) {
+			c.Plex = config.Plex{URL: "http://user:plexpass@plex:32400?X-Plex-Token=plex-secret-token", Token: "plex-secret-token"}
+			c.Claude.OAuthToken = "sk-ant-oat-secret"
+			c.Web = config.Web{Username: "admin", Password: "web-secret-pass"}
+		})
 	})
 	req := httptest.NewRequest("GET", "/api/config", nil)
 	req.SetBasicAuth("admin", "web-secret-pass")
