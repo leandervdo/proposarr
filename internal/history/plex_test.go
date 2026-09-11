@@ -64,18 +64,22 @@ func TestPlexMovies(t *testing.T) {
 	f := &plexFixture{t: t,
 		history: func(r *http.Request) []map[string]any {
 			q := r.URL.Query()
-			if q.Get("type") != "1" || q.Get("sort") != "viewedAt:desc" || q.Get("viewedAt>") != strconv.FormatInt(since.Unix(), 10) {
+			if q.Has("type") || q.Get("sort") != "viewedAt:desc" || q.Get("viewedAt>") != strconv.FormatInt(since.Unix(), 10) {
 				t.Errorf("unexpected query %s", r.URL.RawQuery)
 			}
 			return []map[string]any{
 				{"ratingKey": "10", "title": "The Matrix", "year": 1999, "viewedAt": recent + 100},
 				{"ratingKey": "10", "title": "The Matrix", "year": 1999, "viewedAt": recent},
-				{"ratingKey": 11, "title": "Gone", "year": 2001, "viewedAt": recent},
+				{"type": "movie", "ratingKey": 11, "title": "Gone", "originallyAvailableAt": "2001-05-04", "viewedAt": recent},
+				// Plex returns episodes in the same history; they must not count as movies.
+				{"type": "episode", "ratingKey": "2775", "title": "Blood Money", "grandparentTitle": "Breaking Bad", "grandparentKey": "/library/metadata/2713", "viewedAt": recent},
+				{"ratingKey": "2776", "title": "Over", "grandparentTitle": "Breaking Bad", "viewedAt": recent},
 				{"ratingKey": "12", "title": "Old", "year": 1980, "viewedAt": since.Add(-time.Hour).Unix()},
 			}
 		},
 		meta: map[string]map[string]any{
-			"10": {"title": "The Matrix", "year": 1999, "Guid": []any{
+			// Real Plex metadata carries both "guid" (string) and "Guid" (array).
+			"10": {"title": "The Matrix", "year": 1999, "guid": "plex://movie/5d7768...", "Guid": []any{
 				map[string]any{"id": "imdb://tt0133093"}, map[string]any{"id": "tmdb://603"},
 			}},
 		},
@@ -114,16 +118,18 @@ func TestPlexSeries(t *testing.T) {
 	items = append(items, ep("/library/metadata/300", "3001", 5))
 	items = append(items, ep("/library/metadata/400", "4001", 6), ep("/library/metadata/400", "4002", 7))
 	items = append(items, map[string]any{"ratingKey": "9001", "title": "ep", "grandparentTitle": "Orphan", "viewedAt": at})
+	// Movies share the history endpoint and must be skipped for series.
+	items = append(items, map[string]any{"type": "movie", "ratingKey": "785", "title": "The Fellowship of the Ring", "year": 2001, "viewedAt": at})
 
 	f := &plexFixture{t: t,
 		history: func(r *http.Request) []map[string]any {
-			if r.URL.Query().Get("type") != "4" {
-				t.Errorf("series history type = %q", r.URL.Query().Get("type"))
+			if r.URL.Query().Has("type") {
+				t.Errorf("history must not filter by type server-side: %q", r.URL.RawQuery)
 			}
 			return items
 		},
 		meta: map[string]map[string]any{
-			"100": {"title": "Game of Thrones", "year": 2011, "leafCount": 73, "Guid": []any{
+			"100": {"title": "Game of Thrones", "year": 2011, "leafCount": 73, "guid": "plex://show/5d9c086c...", "Guid": []any{
 				map[string]any{"id": "tmdb://1399"}, map[string]any{"id": "tvdb://121361"},
 			}},
 			"200": {"title": "B", "Guid": []any{map[string]any{"id": "tvdb://5"}}},

@@ -64,18 +64,36 @@ func (f *flexString) UnmarshalJSON(b []byte) error {
 }
 
 type plexItem struct {
-	RatingKey        flexString `json:"ratingKey"`
-	Key              string     `json:"key"`
-	Type             string     `json:"type"`
-	Title            string     `json:"title"`
-	Year             int        `json:"year"`
-	GrandparentTitle string     `json:"grandparentTitle"`
-	GrandparentKey   string     `json:"grandparentKey"`
-	ViewedAt         int64      `json:"viewedAt"`
-	LeafCount        int        `json:"leafCount"`
-	Guid             []struct {
+	RatingKey flexString `json:"ratingKey"`
+	Key       string     `json:"key"`
+	Type      string     `json:"type"`
+	Title     string     `json:"title"`
+	Year      int        `json:"year"`
+	// History items carry a release date instead of year.
+	OriginallyAvailableAt string `json:"originallyAvailableAt"`
+	GrandparentTitle      string `json:"grandparentTitle"`
+	GrandparentKey        string `json:"grandparentKey"`
+	ViewedAt              int64  `json:"viewedAt"`
+	LeafCount             int    `json:"leafCount"`
+	// Metadata has both "guid" (a plex:// string) and "Guid" (external ids).
+	// encoding/json matches names case-insensitively, so without this field the
+	// string lands in Guid and the whole decode fails.
+	PlexGUID string `json:"guid"`
+	Guid     []struct {
 		ID string `json:"id"`
 	} `json:"Guid"`
+}
+
+func (it plexItem) year() int {
+	if it.Year > 0 {
+		return it.Year
+	}
+	if len(it.OriginallyAvailableAt) >= 4 {
+		if y, err := strconv.Atoi(it.OriginallyAvailableAt[:4]); err == nil {
+			return y
+		}
+	}
+	return 0
 }
 
 type plexContainer struct {
@@ -126,7 +144,7 @@ func (p *Plex) History(ctx context.Context, kind media.Kind, since time.Time) ([
 		if a == nil {
 			a = &plexAgg{entry: Entry{Kind: kind, Title: title}, metaPath: metaPath}
 			if kind == media.Movies {
-				a.entry.Year = it.Year
+				a.entry.Year = it.year()
 			} else {
 				a.episodes = map[string]int{}
 			}
@@ -172,18 +190,27 @@ func (p *Plex) History(ctx context.Context, kind media.Kind, since time.Time) ([
 	return Merge(entries), nil
 }
 
-func (p *Plex) fetch(ctx context.Context, kind media.Kind, since time.Time) ([]plexItem, error) {
-	typ := "1"
-	if kind == media.Series {
-		typ = "4"
+// plexIsKind filters history client-side: the history endpoint ignores its
+// type parameter (type=1 returns episodes too, type=4 returns nothing).
+func plexIsKind(kind media.Kind, it plexItem) bool {
+	switch it.Type {
+	case "movie":
+		return kind == media.Movies
+	case "episode":
+		return kind == media.Series
+	case "":
+		return (it.GrandparentTitle != "") == (kind == media.Series)
 	}
+	return false
+}
+
+func (p *Plex) fetch(ctx context.Context, kind media.Kind, since time.Time) ([]plexItem, error) {
 	cutoff := since.Unix()
 	var out []plexItem
 	for start := 0; ; {
 		q := url.Values{
 			"sort":                   {"viewedAt:desc"},
 			"viewedAt>":              {strconv.FormatInt(cutoff, 10)},
-			"type":                   {typ},
 			"X-Plex-Container-Start": {strconv.Itoa(start)},
 			"X-Plex-Container-Size":  {strconv.Itoa(plexPageSize)},
 		}
@@ -198,7 +225,9 @@ func (p *Plex) fetch(ctx context.Context, kind media.Kind, since time.Time) ([]p
 				older = true
 				continue
 			}
-			out = append(out, it)
+			if plexIsKind(kind, it) {
+				out = append(out, it)
+			}
 		}
 		start += len(items)
 		// A page larger than requested means the server ignored paging.
