@@ -54,7 +54,9 @@ Configure Proposarr with a YAML file, environment variables, or both. Environmen
 
 | Variable | Default | Notes |
 |---|---|---|
-| `PROPOSARR_DATA_DIR` | `data` | Snapshot cache and run data |
+| `PROPOSARR_LISTEN` | `:8585` | Address `proposarr serve` listens on |
+| `PROPOSARR_WEB_USERNAME`, `PROPOSARR_WEB_PASSWORD` | | Optional HTTP Basic login for the web UI and API. Set both or neither |
+| `PROPOSARR_DATA_DIR` | `data` | Snapshot cache, SQLite database and run data |
 | `PROPOSARR_HISTORY_DAYS` | `180` | Watch-history window |
 | `PROPOSARR_SNAPSHOT_TTL` | `6h` | Library snapshot lifetime |
 | `PROPOSARR_SONARR_URL`, `PROPOSARR_SONARR_API_KEY` | | URL required for series. API key optional, see below |
@@ -72,8 +74,6 @@ Configure Proposarr with a YAML file, environment variables, or both. Environmen
 | `ANTHROPIC_API_KEY` | | API key, see below |
 | `PROPOSARR_CLAUDE_TIMEOUT` | `10m` | Wall-clock limit per run |
 | `PROPOSARR_CLAUDE_MAX_BUDGET_USD` | `0` | Spend cap per run, 0 for none |
-
-**Sonarr/Radarr API key fallback.** When the API key is left empty, Proposarr reads it from the app's `/initialize.json`, the file its web UI loads. That only works while Sonarr/Radarr do not require a login from Proposarr's address (Settings → General → Authentication Required → Disabled for Local Addresses), and it is not an official API. A configured key always wins; set one if you enable authentication.
 | `PROPOSARR_MOVIES_MODEL`, `PROPOSARR_SERIES_MODEL` | `claude-sonnet-5` | |
 | `PROPOSARR_MOVIES_EFFORT`, `PROPOSARR_SERIES_EFFORT` | `medium` | `low`, `medium`, `high`, `xhigh`, `max` |
 | `PROPOSARR_MOVIES_PICKS`, `PROPOSARR_SERIES_PICKS` | `10` | Picks per run |
@@ -82,9 +82,12 @@ Configure Proposarr with a YAML file, environment variables, or both. Environmen
 | `PROPOSARR_MOVIES_SEEDS`, `PROPOSARR_SERIES_SEEDS` | `15` | Profile titles used to fetch recommendations |
 | `PROPOSARR_MOVIES_TOP_TITLES`, `PROPOSARR_SERIES_TOP_TITLES` | `40` | Profile titles shown to the model |
 
+**Sonarr/Radarr API key fallback.** When the API key is left empty, Proposarr reads it from the app's `/initialize.json`, the file its web UI loads. That only works while Sonarr/Radarr do not require a login from Proposarr's address (Settings → General → Authentication Required → Disabled for Local Addresses), and it is not an official API. A configured key always wins; set one if you enable authentication.
+
 ## Usage
 
 ```sh
+proposarr serve [--listen ADDR]   # web UI and HTTP API
 proposarr run --kind movies|series [--vibe TEXT] [--picks N] [--model M] [--effort E] [--json] [--refresh] [--add]
 proposarr add --kind movies|series --tmdb ID [--quality-profile NAME|ID] [--root-folder PATH]
 proposarr check            # test every configured connection
@@ -95,6 +98,14 @@ proposarr version
 Every command accepts `--config PATH`. `run` prints the picks to stdout, or the whole run as JSON with `--json`; progress, warnings and rejected picks go to stderr. `--refresh` ignores the cached library snapshot. `--picks`, `--model` and `--effort` override the per-kind settings for one run.
 
 `check` prints `ok`, `FAIL` or `skip` for Radarr, Sonarr, TMDB, Plex, Jellyfin, the `claude` binary and the Claude credential mode, and exits 1 if anything failed. It makes no model call; `validate-token` does.
+
+### Web UI and API
+
+`proposarr serve` starts the web UI and the HTTP API on one port (`PROPOSARR_LISTEN`, default `:8585`; `--listen` overrides it). Runs, picks, verdicts and requests are stored in `proposarr.db` under the data directory. Start a run, accept, ignore or postpone picks, and add accepted picks to Sonarr or Radarr from the browser; adding asks for a quality profile for that title, just like the CLI. Titles you accepted, ignored, postponed or added are left out of later runs.
+
+The UI has no login by default. Set `PROPOSARR_WEB_USERNAME` and `PROPOSARR_WEB_PASSWORD` to require HTTP Basic auth, especially if anyone else can reach the port: the UI can add titles to Sonarr and Radarr and start Claude runs. `/healthz` stays open for container health checks.
+
+The API is documented in [`docs/API.md`](docs/API.md). A binary built without the UI (`web/dist` empty) serves a short notice page instead; build the UI with `pnpm install && pnpm build` in `web/` before `go build`.
 
 ### Quality profile per title
 
@@ -127,17 +138,18 @@ Anthropic's terms cover Claude Code. Whether a scheduled, headless Claude Code r
 
 ## Docker
 
-Images for `linux/amd64` and `linux/arm64` are published as [`leandervdo/proposarr`](https://hub.docker.com/r/leandervdo/proposarr). The image bundles Proposarr and the Claude Code CLI, and works with any Sonarr and Radarr install it can reach over the network.
+Images for `linux/amd64` and `linux/arm64` are published as [`leander1999/proposarr`](https://hub.docker.com/r/leander1999/proposarr). The image bundles Proposarr and the Claude Code CLI, and works with any Sonarr and Radarr install it can reach over the network.
 
 ```sh
 docker run -d --name proposarr \
   --user 1000:1000 \
+  -p 8585:8585 \
   -v /path/to/proposarr:/config \
   -e CLAUDE_CODE_OAUTH_TOKEN=... \
   -e PROPOSARR_TMDB_API_KEY=... \
   -e PROPOSARR_RADARR_URL=http://radarr:7878 \
   -e PROPOSARR_RADARR_API_KEY=... \
-  leandervdo/proposarr:latest
+  leander1999/proposarr:latest
 ```
 
 See [`docker-compose.example.yml`](docker-compose.example.yml) for a compose file.
@@ -146,7 +158,8 @@ See [`docker-compose.example.yml`](docker-compose.example.yml) for a compose fil
 - **Config.** `/config/proposarr.yaml` is picked up automatically, or use the environment variables above. The library cache and the Claude CLI's own state also live under `/config`.
 - **Claude authentication.** The container cannot use the login of the `claude` CLI on your desktop. Set `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) or `ANTHROPIC_API_KEY`.
 - **Network.** Sonarr, Radarr, Plex and Jellyfin URLs must be reachable from inside the container: use the service name when they share a Docker network (`http://radarr:7878`), or a LAN address. `localhost` inside the container is the container itself.
-- **Running commands.** Until the web UI exists the container idles. Run commands inside it:
+- **Web UI.** The container runs `proposarr serve` on port 8585. Publish it with `-p 8585:8585` and open `http://<host>:8585`.
+- **Running commands.** CLI commands also work inside the running container:
 
   ```sh
   docker exec proposarr proposarr check

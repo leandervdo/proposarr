@@ -16,6 +16,7 @@ import (
 )
 
 type Config struct {
+	Listen      string   `yaml:"listen"`
 	DataDir     string   `yaml:"data_dir"`
 	HistoryDays int      `yaml:"history_days"`
 	SnapshotTTL Duration `yaml:"snapshot_ttl"`
@@ -26,6 +27,7 @@ type Config struct {
 	Jellyfin Jellyfin `yaml:"jellyfin"`
 	TMDB     TMDB     `yaml:"tmdb"`
 	Claude   Claude   `yaml:"claude"`
+	Web      Web      `yaml:"web"`
 
 	Movies KindSettings `yaml:"movies"`
 	Series KindSettings `yaml:"series"`
@@ -40,6 +42,15 @@ type Arr struct {
 }
 
 func (a Arr) Configured() bool { return a.URL != "" && a.APIKey != "" }
+
+// Web holds optional HTTP Basic credentials for `proposarr serve`.
+type Web struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
+// AuthEnabled reports whether the web UI requires a login.
+func (w Web) AuthEnabled() bool { return w.Username != "" && w.Password != "" }
 
 type Plex struct {
 	URL   string `yaml:"url"`
@@ -118,6 +129,7 @@ func defaultKind() KindSettings {
 // Default returns the settings used when nothing is configured.
 func Default() Config {
 	return Config{
+		Listen:      ":8585",
 		DataDir:     "data",
 		HistoryDays: 180,
 		SnapshotTTL: Duration{6 * time.Hour},
@@ -143,6 +155,9 @@ func Load(path string, getenv func(string) string) (Config, error) {
 	}
 	if err := applyEnv(&cfg, getenv); err != nil {
 		return cfg, err
+	}
+	if (cfg.Web.Username == "") != (cfg.Web.Password == "") {
+		return cfg, errors.New("web: set both username and password (PROPOSARR_WEB_USERNAME, PROPOSARR_WEB_PASSWORD) or neither")
 	}
 	return cfg, nil
 }
@@ -183,6 +198,9 @@ func applyEnv(c *Config, getenv func(string) string) error {
 		}
 	}
 
+	str("PROPOSARR_LISTEN", &c.Listen)
+	str("PROPOSARR_WEB_USERNAME", &c.Web.Username)
+	str("PROPOSARR_WEB_PASSWORD", &c.Web.Password)
 	str("PROPOSARR_DATA_DIR", &c.DataDir)
 	num("PROPOSARR_HISTORY_DAYS", &c.HistoryDays)
 	dur("PROPOSARR_SNAPSHOT_TTL", &c.SnapshotTTL)

@@ -64,6 +64,8 @@ func (c *cli) dispatch(ctx context.Context, args []string) int {
 		err = c.runCmd(ctx, args[1:])
 	case "add":
 		err = c.addCmd(ctx, args[1:])
+	case "serve":
+		err = c.serveCmd(ctx, args[1:])
 	case "check":
 		err = c.checkCmd(ctx, args[1:])
 	case "validate-token":
@@ -101,6 +103,7 @@ func (c *cli) usage(w io.Writer) {
 	fmt.Fprint(w, `Proposarr proposes new movies and series for Radarr and Sonarr.
 
 Usage:
+  proposarr serve [--listen ADDR]   run the web UI and HTTP API (default :8585)
   proposarr run --kind movies|series [--vibe TEXT] [--picks N] [--model M] [--effort E] [--json] [--refresh] [--add]
   proposarr add --kind movies|series --tmdb ID [--quality-profile NAME|ID] [--root-folder PATH]
   proposarr check            test every configured connection

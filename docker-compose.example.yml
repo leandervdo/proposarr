@@ -2,7 +2,7 @@
 # ./config/proposarr.yaml instead of the environment.
 services:
   proposarr:
-    image: leandervdo/proposarr:latest
+    image: leander1999/proposarr:latest
     container_name: proposarr
     restart: unless-stopped
     # uid:gid that owns ./config on the host (default image user is 1000:1000)

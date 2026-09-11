@@ -76,12 +76,14 @@ func (d *deps) library(refresh bool) *snapshot.Library {
 	return l
 }
 
-func (d *deps) pipeline(refresh bool, progress func(string)) *pipeline.Pipeline {
+// pipeline builds a run pipeline. excl may be nil (the CLI keeps no verdicts).
+func (d *deps) pipeline(refresh bool, progress func(string), excl pipeline.Exclusions) *pipeline.Pipeline {
 	pd := pipeline.Deps{
-		Library:  d.library(refresh),
-		History:  d.historySources(),
-		Agent:    agent.Claude{Bin: d.cfg.Claude.Bin},
-		Progress: progress,
+		Library:    d.library(refresh),
+		History:    d.historySources(),
+		Agent:      agent.Claude{Bin: d.cfg.Claude.Bin},
+		Progress:   progress,
+		Exclusions: excl,
 	}
 	if d.tmdb != nil {
 		pd.Meta = d.tmdb
@@ -108,6 +110,27 @@ func (d *deps) requester() *request.Requester {
 		r.TMDB = d.tmdb
 	}
 	return r
+}
+
+// runRequest builds a pipeline request from the per-kind settings.
+func runRequest(cfg config.Config, kind media.Kind, vibe string, env []string) pipeline.Request {
+	ks := cfg.Kind(kind)
+	return pipeline.Request{
+		Kind:         kind,
+		Vibe:         vibe,
+		Model:        ks.Model,
+		Effort:       ks.Effort,
+		Picks:        ks.Picks,
+		Candidates:   ks.Candidates,
+		FreePicks:    ks.FreePicks,
+		Seeds:        ks.Seeds,
+		TopTitles:    ks.TopTitles,
+		HistoryDays:  cfg.HistoryDays,
+		Region:       cfg.TMDB.Region,
+		AgentEnv:     env,
+		Timeout:      cfg.Claude.Timeout.Duration,
+		MaxBudgetUSD: cfg.Claude.MaxBudgetUSD,
+	}
 }
 
 // agentEnv is the environment handed to the claude binary, and the credential

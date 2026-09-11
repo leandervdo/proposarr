@@ -41,15 +41,40 @@ func (r *Radarr) Movies(ctx context.Context) ([]media.Title, error) {
 		TMDBID int       `json:"tmdbId"`
 		Genres []string  `json:"genres"`
 		Added  time.Time `json:"added"`
+		Images []image   `json:"images"`
 	}
 	if err := r.c.get(ctx, "/api/v3/movie", nil, &ms); err != nil {
 		return nil, err
 	}
 	out := make([]media.Title, 0, len(ms))
 	for _, m := range ms {
-		out = append(out, media.Title{TMDBID: m.TMDBID, Title: m.Title, Year: m.Year, Genres: m.Genres, Added: m.Added})
+		out = append(out, media.Title{TMDBID: m.TMDBID, Title: m.Title, Year: m.Year, Genres: m.Genres, Added: m.Added, PosterURL: posterURL(m.Images)})
 	}
 	return out, nil
+}
+
+// image is an *arr media cover.
+type image struct {
+	CoverType string `json:"coverType"`
+	URL       string `json:"url"`
+	RemoteURL string `json:"remoteUrl"`
+}
+
+// posterURL returns the poster's remote URL. The local /MediaCover URL needs
+// the *arr's own auth, so it is only used when it is absolute.
+func posterURL(images []image) string {
+	for _, im := range images {
+		if im.CoverType != "poster" {
+			continue
+		}
+		if im.RemoteURL != "" {
+			return im.RemoteURL
+		}
+		if u, err := url.Parse(im.URL); err == nil && u.IsAbs() {
+			return im.URL
+		}
+	}
+	return ""
 }
 
 // Discover returns Radarr's import-list recommendations not yet in the library.

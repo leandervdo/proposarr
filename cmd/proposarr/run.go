@@ -56,23 +56,7 @@ func (c *cli) runCmd(ctx context.Context, args []string) error {
 		return err
 	}
 
-	ks := cfg.Kind(kind)
-	req := pipeline.Request{
-		Kind:         kind,
-		Vibe:         strings.TrimSpace(*vibe),
-		Model:        ks.Model,
-		Effort:       ks.Effort,
-		Picks:        ks.Picks,
-		Candidates:   ks.Candidates,
-		FreePicks:    ks.FreePicks,
-		Seeds:        ks.Seeds,
-		TopTitles:    ks.TopTitles,
-		HistoryDays:  cfg.HistoryDays,
-		Region:       cfg.TMDB.Region,
-		AgentEnv:     env,
-		Timeout:      cfg.Claude.Timeout.Duration,
-		MaxBudgetUSD: cfg.Claude.MaxBudgetUSD,
-	}
+	req := runRequest(cfg, kind, strings.TrimSpace(*vibe), env)
 	if *picks > 0 {
 		req.Picks = *picks
 	}
@@ -83,7 +67,7 @@ func (c *cli) runCmd(ctx context.Context, args []string) error {
 		req.Effort = *effort
 	}
 
-	p := d.pipeline(*refresh, func(msg string) { fmt.Fprintln(c.stderr, msg) })
+	p := d.pipeline(*refresh, func(msg string) { fmt.Fprintln(c.stderr, msg) }, nil)
 	run, runErr := p.Run(ctx, req)
 	if run != nil {
 		renderDiagnostics(c.stderr, run)

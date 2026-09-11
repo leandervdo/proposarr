@@ -1,0 +1,182 @@
+// Package web serves the Proposarr HTTP API, server-sent events and the UI.
+package web
+
+import (
+	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/json"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/leandervdo/proposarr/internal/arr"
+	"github.com/leandervdo/proposarr/internal/config"
+	"github.com/leandervdo/proposarr/internal/media"
+	"github.com/leandervdo/proposarr/internal/pipeline"
+	"github.com/leandervdo/proposarr/internal/request"
+	"github.com/leandervdo/proposarr/internal/store"
+)
+
+// Runner runs one recommendation pass (pipeline.Pipeline).
+type Runner interface {
+	Run(ctx context.Context, req pipeline.Request) (*pipeline.Run, error)
+}
+
+// Adder adds a title to Sonarr or Radarr (request.Requester).
+type Adder interface {
+	Add(ctx context.Context, item request.Item, ch request.Chooser) (request.Result, error)
+}
+
+// AppCatalog lists the quality profiles and root folders of an *arr app.
+type AppCatalog interface {
+	QualityProfiles(ctx context.Context) ([]arr.QualityProfile, error)
+	RootFolders(ctx context.Context) ([]arr.RootFolder, error)
+}
+
+const (
+	CheckOK   = "ok"
+	CheckFail = "fail"
+	CheckSkip = "skip"
+)
+
+type CheckResult struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+}
+
+// Options wires the server to its ports. Nil functions disable their routes.
+type Options struct {
+	Version string
+	Config  config.Config // API keys already resolved; secrets never leave the server
+	Store   store.Store
+
+	NewRunner  func(progress func(string)) Runner
+	RunRequest func(kind media.Kind, vibe string) (pipeline.Request, error)
+	Adder      Adder
+	App        func(app string) (catalog AppCatalog, defaultRootFolder string, ok bool)
+	Library    func(ctx context.Context, kind media.Kind) ([]media.Title, error)
+	Check      func(ctx context.Context) []CheckResult
+
+	UI     fs.FS
+	Logger *slog.Logger
+	Now    func() time.Time
+}
+
+type Server struct {
+	o      Options
+	log    *slog.Logger
+	now    func() time.Time
+	events *hub
+
+	ctx    context.Context // server lifetime, parent of every run
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+
+	mu      sync.Mutex
+	closed  bool
+	running map[media.Kind]*activeRun
+}
+
+func New(o Options) *Server {
+	s := &Server{o: o, log: o.Logger, now: o.Now, events: newHub(), running: map[media.Kind]*activeRun{}}
+	if s.log == nil {
+		s.log = slog.New(slog.DiscardHandler)
+	}
+	if s.now == nil {
+		s.now = time.Now
+	}
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+	return s
+}
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprint(w, "ok")
+	})
+	mux.HandleFunc("GET /api/status", s.status)
+	mux.HandleFunc("GET /api/connections/check", s.checkConnections)
+	mux.HandleFunc("GET /api/config", s.config)
+	mux.HandleFunc("GET /api/runs", s.listRuns)
+	mux.HandleFunc("GET /api/runs/{id}", s.getRun)
+	mux.HandleFunc("POST /api/runs", s.createRun)
+	mux.HandleFunc("GET /api/picks", s.listPicks)
+	mux.HandleFunc("POST /api/picks/{id}/verdict", s.setVerdict)
+	mux.HandleFunc("POST /api/picks/{id}/request", s.requestPick)
+	mux.HandleFunc("GET /api/apps/{app}/options", s.appOptions)
+	mux.HandleFunc("GET /api/library", s.library)
+	mux.HandleFunc("GET /api/events", s.streamEvents)
+	mux.HandleFunc("/", s.static)
+	return securityHeaders(s.auth(mux))
+}
+
+// CloseEvents disconnects every event stream so http.Server.Shutdown is not held open.
+func (s *Server) CloseEvents() { s.events.close() }
+
+// Shutdown refuses new runs, cancels running ones and waits until they are recorded.
+func (s *Server) Shutdown() {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	s.cancel()
+	s.wg.Wait()
+	s.events.close()
+}
+
+func (s *Server) auth(next http.Handler) http.Handler {
+	user, pass := s.o.Config.Web.Username, s.o.Config.Web.Password
+	if user == "" || pass == "" {
+		return next
+	}
+	wantUser, wantPass := sha256.Sum256([]byte(user)), sha256.Sum256([]byte(pass))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		u, p, ok := r.BasicAuth()
+		gotUser, gotPass := sha256.Sum256([]byte(u)), sha256.Sum256([]byte(p))
+		match := subtle.ConstantTimeCompare(gotUser[:], wantUser[:]) & subtle.ConstantTimeCompare(gotPass[:], wantPass[:])
+		if !ok || match != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Proposarr", charset="UTF-8"`)
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "same-origin")
+		h.Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func decodeBody(w http.ResponseWriter, r *http.Request, v any) error {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(v); err != nil {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	return nil
+}

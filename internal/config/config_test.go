@@ -14,6 +14,38 @@ func envMap(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
+func TestListenAndWebAuth(t *testing.T) {
+	c, err := Load("", envMap(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen != ":8585" || c.Web.AuthEnabled() {
+		t.Fatalf("defaults: listen %q, auth %v", c.Listen, c.Web.AuthEnabled())
+	}
+
+	p := writeFile(t, "listen: \":9000\"\nweb:\n  username: admin\n  password: hunter2\n")
+	c, err = Load(p, envMap(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen != ":9000" || c.Web.Username != "admin" || c.Web.Password != "hunter2" || !c.Web.AuthEnabled() {
+		t.Fatalf("yaml: %+v", c)
+	}
+	c, err = Load(p, envMap(map[string]string{"PROPOSARR_LISTEN": "127.0.0.1:9001", "PROPOSARR_WEB_PASSWORD": "env-pass"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Listen != "127.0.0.1:9001" || c.Web.Password != "env-pass" {
+		t.Fatalf("env override: listen %q, password %q", c.Listen, c.Web.Password)
+	}
+
+	for _, env := range []map[string]string{{"PROPOSARR_WEB_USERNAME": "admin"}, {"PROPOSARR_WEB_PASSWORD": "x"}} {
+		if _, err := Load("", envMap(env)); err == nil || !strings.Contains(err.Error(), "PROPOSARR_WEB_USERNAME") {
+			t.Errorf("%v: err = %v, want both-or-neither error", env, err)
+		}
+	}
+}
+
 func writeFile(t *testing.T, content string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "proposarr.yaml")

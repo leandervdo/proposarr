@@ -44,12 +44,13 @@ func (k Kind) App() string {
 
 // Title is one library or history item.
 type Title struct {
-	TMDBID int       `json:"tmdb_id,omitempty"`
-	TVDBID int       `json:"tvdb_id,omitempty"`
-	Title  string    `json:"title"`
-	Year   int       `json:"year,omitempty"`
-	Genres []string  `json:"genres,omitempty"`
-	Added  time.Time `json:"added,omitempty"`
+	TMDBID    int       `json:"tmdb_id,omitempty"`
+	TVDBID    int       `json:"tvdb_id,omitempty"`
+	Title     string    `json:"title"`
+	Year      int       `json:"year,omitempty"`
+	Genres    []string  `json:"genres,omitempty"`
+	Added     time.Time `json:"added,omitempty"`
+	PosterURL string    `json:"poster_url,omitempty"`
 }
 
 // Label renders "Title (Year)".

@@ -26,15 +26,21 @@ type Metadata interface {
 	Search(ctx context.Context, kind media.Kind, query string, year int) ([]tmdb.Item, error)
 }
 
-// Deps are the ports a run needs. History and Discover are optional.
+// Exclusions are TMDB ids a user already decided on (ignored, later, requested).
+type Exclusions interface {
+	Excluded(ctx context.Context, kind media.Kind) (map[int]bool, error)
+}
+
+// Deps are the ports a run needs. History, Discover and Exclusions are optional.
 type Deps struct {
-	Library  Library
-	History  []history.Source
-	Meta     Metadata
-	Discover candidates.Discover // movies only
-	Agent    agent.Provider
-	Progress func(msg string) // optional progress lines
-	Now      func() time.Time
+	Library    Library
+	History    []history.Source
+	Meta       Metadata
+	Discover   candidates.Discover // movies only
+	Exclusions Exclusions
+	Agent      agent.Provider
+	Progress   func(msg string) // optional progress lines
+	Now        func() time.Time
 }
 
 // Request is one run's settings.

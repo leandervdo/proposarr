@@ -45,20 +45,28 @@ func jsonBody(v string) http.HandlerFunc {
 
 func TestRadarrMovies(t *testing.T) {
 	srv, _ := server(t, map[string]http.HandlerFunc{
-		"GET /api/v3/movie": jsonBody(`[{"id":1,"title":"Arrival","year":2016,"tmdbId":329865,"genres":["Drama","Science Fiction"],"added":"2023-04-01T10:00:00Z"}]`),
+		"GET /api/v3/movie": jsonBody(`[{"id":1,"title":"Arrival","year":2016,"tmdbId":329865,"genres":["Drama","Science Fiction"],"added":"2023-04-01T10:00:00Z",
+			"images":[{"coverType":"fanart","remoteUrl":"https://image.tmdb.org/t/p/original/fan.jpg"},{"coverType":"poster","url":"/MediaCover/1/poster.jpg","remoteUrl":"https://image.tmdb.org/t/p/original/poster.jpg"}]},
+			{"id":2,"title":"Local Only","year":2001,"tmdbId":7,"images":[{"coverType":"poster","url":"/MediaCover/2/poster.jpg"}]}]`),
 	})
 	ms, err := NewRadarr(srv.URL+"/", key, nil).Movies(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ms) != 1 || ms[0].TMDBID != 329865 || ms[0].Title != "Arrival" || ms[0].Year != 2016 || len(ms[0].Genres) != 2 || ms[0].Added.Year() != 2023 {
+	if len(ms) != 2 || ms[0].TMDBID != 329865 || ms[0].Title != "Arrival" || ms[0].Year != 2016 || len(ms[0].Genres) != 2 || ms[0].Added.Year() != 2023 {
 		t.Fatalf("movies = %+v", ms)
+	}
+	if ms[0].PosterURL != "https://image.tmdb.org/t/p/original/poster.jpg" {
+		t.Errorf("poster = %q, want the remote poster", ms[0].PosterURL)
+	}
+	if ms[1].PosterURL != "" {
+		t.Errorf("relative poster url should be dropped, got %q", ms[1].PosterURL)
 	}
 }
 
 func TestSonarrSeries(t *testing.T) {
 	srv, _ := server(t, map[string]http.HandlerFunc{
-		"GET /api/v3/series": jsonBody(`[{"id":3,"title":"Severance","year":2022,"tvdbId":371980,"tmdbId":95396,"genres":["Drama"]},{"id":4,"title":"Old Show","year":1999,"tvdbId":1234}]`),
+		"GET /api/v3/series": jsonBody(`[{"id":3,"title":"Severance","year":2022,"tvdbId":371980,"tmdbId":95396,"genres":["Drama"],"images":[{"coverType":"poster","remoteUrl":"https://artworks.thetvdb.com/poster.jpg"}]},{"id":4,"title":"Old Show","year":1999,"tvdbId":1234}]`),
 	})
 	ss, err := NewSonarr(srv.URL, key, nil).Series(context.Background())
 	if err != nil {
@@ -66,6 +74,9 @@ func TestSonarrSeries(t *testing.T) {
 	}
 	if len(ss) != 2 || ss[0].TVDBID != 371980 || ss[0].TMDBID != 95396 || ss[1].TMDBID != 0 || ss[1].TVDBID != 1234 {
 		t.Fatalf("series = %+v", ss)
+	}
+	if ss[0].PosterURL != "https://artworks.thetvdb.com/poster.jpg" || ss[1].PosterURL != "" {
+		t.Fatalf("posters = %q, %q", ss[0].PosterURL, ss[1].PosterURL)
 	}
 }
 

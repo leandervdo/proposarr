@@ -40,13 +40,14 @@ func (s *Sonarr) Series(ctx context.Context) ([]media.Title, error) {
 		TMDBID int       `json:"tmdbId"`
 		Genres []string  `json:"genres"`
 		Added  time.Time `json:"added"`
+		Images []image   `json:"images"`
 	}
 	if err := s.c.get(ctx, "/api/v3/series", nil, &ss); err != nil {
 		return nil, err
 	}
 	out := make([]media.Title, 0, len(ss))
 	for _, x := range ss {
-		out = append(out, media.Title{TMDBID: x.TMDBID, TVDBID: x.TVDBID, Title: x.Title, Year: x.Year, Genres: x.Genres, Added: x.Added})
+		out = append(out, media.Title{TMDBID: x.TMDBID, TVDBID: x.TVDBID, Title: x.Title, Year: x.Year, Genres: x.Genres, Added: x.Added, PosterURL: posterURL(x.Images)})
 	}
 	return out, nil
 }

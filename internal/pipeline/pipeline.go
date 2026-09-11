@@ -68,6 +68,15 @@ func (p *Pipeline) Run(ctx context.Context, req Request) (*Run, error) {
 			excluded[h.TMDBID] = true
 		}
 	}
+	if !isNil(p.d.Exclusions) {
+		ids, err := p.d.Exclusions.Excluded(ctx, req.Kind)
+		if err != nil {
+			run.Warnings = append(run.Warnings, fmt.Sprintf("verdict exclusions failed: %v", err))
+		}
+		for id := range ids {
+			excluded[id] = true
+		}
+	}
 
 	prof := profile.Build(req.Kind, lib, hist, p.extraGenres(ctx, req, hist, libIDs, run), req.TopTitles, profile.DefaultWeights)
 	run.Profile = prof

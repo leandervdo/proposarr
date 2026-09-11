@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/leandervdo/proposarr/internal/arr"
+	"github.com/leandervdo/proposarr/internal/config"
 	"github.com/leandervdo/proposarr/internal/media"
+	"github.com/leandervdo/proposarr/internal/web"
 )
 
 func (c *cli) checkCmd(ctx context.Context, args []string) error {
@@ -21,65 +23,96 @@ func (c *cli) checkCmd(ctx context.Context, args []string) error {
 		return err
 	}
 	c.resolveAPIKeys(ctx, &cfg, media.Movies, media.Series)
-	d := buildDeps(cfg)
 
 	failed := false
-	ok := func(format string, a ...any) { fmt.Fprintf(c.stdout, "ok    %s\n", fmt.Sprintf(format, a...)) }
-	skip := func(name string) { fmt.Fprintf(c.stdout, "skip  %s (not configured)\n", name) }
-	fail := func(format string, a ...any) {
-		failed = true
-		fmt.Fprintf(c.stdout, "FAIL  %s\n", fmt.Sprintf(format, a...))
+	for _, r := range runChecks(ctx, cfg, buildDeps(cfg)) {
+		switch r.Status {
+		case web.CheckOK:
+			fmt.Fprintf(c.stdout, "ok    %s\n", strings.TrimSpace(r.Name+" "+r.Detail))
+		case web.CheckSkip:
+			fmt.Fprintf(c.stdout, "skip  %s (%s)\n", r.Name, r.Detail)
+		default:
+			failed = true
+			fmt.Fprintf(c.stdout, "FAIL  %s: %s\n", r.Name, r.Detail)
+		}
+	}
+	fmt.Fprintln(c.stdout, "\nRun `proposarr validate-token` to verify the Claude credential with a short model call.")
+	if failed {
+		return errFailed
+	}
+	return nil
+}
+
+// runChecks tests every configured connection. `check` and the web UI share it.
+func runChecks(ctx context.Context, cfg config.Config, d *deps) []web.CheckResult {
+	var out []web.CheckResult
+	add := func(name, status, detail string) {
+		out = append(out, web.CheckResult{Name: name, Status: status, Detail: detail})
 	}
 	timed := func(fn func(ctx context.Context) error) error {
 		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		return fn(ctx)
 	}
+	// ping reports a nil fn as not configured.
+	ping := func(name string, fn func(ctx context.Context) error) {
+		if fn == nil {
+			add(name, web.CheckSkip, "not configured")
+			return
+		}
+		if err := timed(fn); err != nil {
+			add(name, web.CheckFail, err.Error())
+			return
+		}
+		add(name, web.CheckOK, "")
+	}
 
 	var st arr.SystemStatus
-	if d.radarr == nil && cfg.Radarr.URL != "" {
-		fail("Radarr: no api_key (see note above)")
-	} else if d.radarr == nil {
-		skip("Radarr")
-	} else if err := timed(func(ctx context.Context) (err error) { st, err = d.radarr.Status(ctx); return }); err != nil {
-		fail("Radarr: %v", err)
-	} else {
-		ok("Radarr %s", st.Version)
+	switch {
+	case d.radarr != nil:
+		if err := timed(func(ctx context.Context) (err error) { st, err = d.radarr.Status(ctx); return }); err != nil {
+			add("Radarr", web.CheckFail, err.Error())
+		} else {
+			add("Radarr", web.CheckOK, st.Version)
+		}
+	case cfg.Radarr.URL != "":
+		add("Radarr", web.CheckFail, "no api_key, and none could be read from initialize.json")
+	default:
+		add("Radarr", web.CheckSkip, "not configured")
 	}
-	if d.sonarr == nil && cfg.Sonarr.URL != "" {
-		fail("Sonarr: no api_key (see note above)")
-	} else if d.sonarr == nil {
-		skip("Sonarr")
-	} else if err := timed(func(ctx context.Context) (err error) { st, err = d.sonarr.Status(ctx); return }); err != nil {
-		fail("Sonarr: %v", err)
-	} else {
-		ok("Sonarr %s", st.Version)
+	switch {
+	case d.sonarr != nil:
+		if err := timed(func(ctx context.Context) (err error) { st, err = d.sonarr.Status(ctx); return }); err != nil {
+			add("Sonarr", web.CheckFail, err.Error())
+		} else {
+			add("Sonarr", web.CheckOK, st.Version)
+		}
+	case cfg.Sonarr.URL != "":
+		add("Sonarr", web.CheckFail, "no api_key, and none could be read from initialize.json")
+	default:
+		add("Sonarr", web.CheckSkip, "not configured")
 	}
 	if d.radarr == nil && d.sonarr == nil {
-		fail("Radarr or Sonarr must be configured")
+		add("Radarr or Sonarr", web.CheckFail, "at least one must be configured")
 	}
 
 	if d.tmdb == nil {
-		fail("TMDB (not configured, PROPOSARR_TMDB_API_KEY is required)")
+		add("TMDB", web.CheckFail, "not configured, PROPOSARR_TMDB_API_KEY is required")
 	} else if err := timed(d.tmdb.Ping); err != nil {
-		fail("TMDB: %v", err)
+		add("TMDB", web.CheckFail, err.Error())
 	} else {
-		ok("TMDB")
+		add("TMDB", web.CheckOK, "")
 	}
 
-	if d.plex == nil {
-		skip("Plex")
-	} else if err := timed(d.plex.Ping); err != nil {
-		fail("Plex: %v", err)
+	if d.plex != nil {
+		ping("Plex", d.plex.Ping)
 	} else {
-		ok("Plex")
+		ping("Plex", nil)
 	}
-	if d.jellyfin == nil {
-		skip("Jellyfin")
-	} else if err := timed(d.jellyfin.Ping); err != nil {
-		fail("Jellyfin: %v", err)
+	if d.jellyfin != nil {
+		ping("Jellyfin", d.jellyfin.Ping)
 	} else {
-		ok("Jellyfin")
+		ping("Jellyfin", nil)
 	}
 
 	bin := cfg.Claude.Bin
@@ -87,26 +120,21 @@ func (c *cli) checkCmd(ctx context.Context, args []string) error {
 		bin = "claude"
 	}
 	vctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	out, err := exec.CommandContext(vctx, bin, "--version").Output()
+	v, err := exec.CommandContext(vctx, bin, "--version").Output()
 	cancel()
 	if err != nil {
-		fail("claude binary %q: %v", bin, err)
+		add("claude", web.CheckFail, fmt.Sprintf("binary %q: %v", bin, err))
 	} else {
-		ok("claude %s", strings.TrimSpace(string(out)))
+		add("claude", web.CheckOK, strings.TrimSpace(string(v)))
 	}
 
 	switch name, _, err := cfg.Claude.Auth(); {
 	case err != nil:
-		fail("Claude auth: %v", err)
+		add("Claude auth", web.CheckFail, err.Error())
 	case name == "":
-		ok("Claude auth: local claude login")
+		add("Claude auth", web.CheckOK, "via local claude login")
 	default:
-		ok("Claude auth: %s", name)
+		add("Claude auth", web.CheckOK, "via "+name)
 	}
-
-	fmt.Fprintln(c.stdout, "\nRun `proposarr validate-token` to verify the Claude credential with a short model call.")
-	if failed {
-		return errFailed
-	}
-	return nil
+	return out
 }
