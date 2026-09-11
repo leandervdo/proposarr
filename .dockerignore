@@ -1,0 +1,12 @@
+.git
+.github
+data
+config
+docs
+bin
+dist
+proposarr
+proposarr.yaml
+.env
+*.env
+coverage.out
