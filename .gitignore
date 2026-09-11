@@ -1,0 +1,13 @@
+/data/
+/config/
+docker-compose.yml
+docs/PLAN.md
+/proposarr
+/bin/
+/dist/
+proposarr.yaml
+.env
+*.env
+coverage.out
+.DS_Store
+web/node_modules/
