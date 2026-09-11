@@ -106,6 +106,29 @@ func TestCorruptCacheRefetches(t *testing.T) {
 	}
 }
 
+// A fresh cache written by an older build (no version, no poster_url) must be
+// refetched rather than served for the rest of its TTL.
+func TestOldCacheVersionRefetches(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache", "library-movies.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"fetched_at":"` + time.Now().Add(-time.Minute).Format(time.RFC3339Nano) + `","titles":[{"tmdb_id":1,"title":"Arrival"}]}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := &fakeMovies{titles: []media.Title{{TMDBID: 1, Title: "Arrival", PosterURL: "https://image.tmdb.org/t/p/w500/a.jpg"}}}
+	lib := &Library{Dir: dir, TTL: time.Hour, Radarr: src}
+	got, err := lib.Titles(context.Background(), media.Movies)
+	if err != nil || src.calls != 1 || len(got) != 1 || got[0].PosterURL == "" {
+		t.Fatalf("calls=%d got=%+v err=%v", src.calls, got, err)
+	}
+	if c, ok := readCache(path); !ok || c.Version != cacheVersion {
+		t.Errorf("cache not rewritten with version %d: %+v %v", cacheVersion, c, ok)
+	}
+}
+
 func TestSeriesTVDBResolutionCached(t *testing.T) {
 	dir := t.TempDir()
 	src := &fakeSeries{titles: []media.Title{

@@ -68,7 +68,7 @@ func posterURL(images []image) string {
 			continue
 		}
 		if im.RemoteURL != "" {
-			return im.RemoteURL
+			return sizedPoster(im.RemoteURL)
 		}
 		if u, err := url.Parse(im.URL); err == nil && u.IsAbs() {
 			return im.URL

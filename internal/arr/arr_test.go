@@ -56,8 +56,8 @@ func TestRadarrMovies(t *testing.T) {
 	if len(ms) != 2 || ms[0].TMDBID != 329865 || ms[0].Title != "Arrival" || ms[0].Year != 2016 || len(ms[0].Genres) != 2 || ms[0].Added.Year() != 2023 {
 		t.Fatalf("movies = %+v", ms)
 	}
-	if ms[0].PosterURL != "https://image.tmdb.org/t/p/original/poster.jpg" {
-		t.Errorf("poster = %q, want the remote poster", ms[0].PosterURL)
+	if ms[0].PosterURL != "https://image.tmdb.org/t/p/w500/poster.jpg" {
+		t.Errorf("poster = %q, want the remote poster at w500", ms[0].PosterURL)
 	}
 	if ms[1].PosterURL != "" {
 		t.Errorf("relative poster url should be dropped, got %q", ms[1].PosterURL)

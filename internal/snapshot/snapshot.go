@@ -35,7 +35,12 @@ type Library struct {
 	Now     func() time.Time
 }
 
+// cacheVersion is bumped whenever media.Title gains fields, so caches written
+// by an older build are refetched instead of served without them.
+const cacheVersion = 2
+
 type cacheFile struct {
+	Version   int           `json:"version"`
 	FetchedAt time.Time     `json:"fetched_at"`
 	Titles    []media.Title `json:"titles"`
 }
@@ -122,13 +127,14 @@ func readCache(path string) (cacheFile, bool) {
 	if err != nil {
 		return c, false
 	}
-	if err := json.Unmarshal(b, &c); err != nil || c.FetchedAt.IsZero() {
+	if err := json.Unmarshal(b, &c); err != nil || c.FetchedAt.IsZero() || c.Version != cacheVersion {
 		return c, false
 	}
 	return c, true
 }
 
 func writeCache(path string, c cacheFile) error {
+	c.Version = cacheVersion
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
