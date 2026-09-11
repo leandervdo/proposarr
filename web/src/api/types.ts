@@ -15,6 +15,8 @@ export interface Run {
   id: number;
   kind: Kind;
   vibe?: string;
+  /** false for an open search driven only by `vibe`. */
+  use_taste: boolean;
   model: string;
   effort: string;
   status: RunStatus;
@@ -50,6 +52,7 @@ export interface Pick {
   id: number;
   run_id: number;
   tmdb_id: number;
+  imdb_id?: string;
   kind: Kind;
   title: string;
   year?: number;
@@ -62,10 +65,21 @@ export interface Pick {
   rating?: number;
   streaming?: string[];
   poster_url?: string;
+  ratings?: Ratings;
   verdict?: Verdict;
   verdict_at?: string;
   later_until?: string;
   request?: Request;
+}
+
+/** Real ratings. Series usually only have IMDb. Unknown values are omitted. */
+export interface Ratings {
+  /** value 0–10 */
+  imdb?: { value: number; votes: number };
+  /** critic score 0–100 */
+  rotten_tomatoes?: number;
+  /** 0–100 */
+  metacritic?: number;
 }
 
 export type Signal = "rewatched" | "watched" | "partial" | "owned";

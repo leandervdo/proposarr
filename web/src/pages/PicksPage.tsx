@@ -1,6 +1,6 @@
-import { Clapperboard, Filter, Gauge, Loader2, Settings2 } from "lucide-react";
+import { AlertCircle, Clapperboard, Filter, Gauge, Loader2, Search, Settings2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useMemo, useState, type FormEvent } from "react";
+import { useCallback, useMemo, useState, type FormEvent } from "react";
 import { Link, Navigate, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { ApiError } from "@/api/client";
@@ -13,7 +13,9 @@ import { PickCard } from "@/components/PickCard";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/segmented";
 import { Select, SelectItem } from "@/components/ui/select";
-import { appFor, appName, duration, relativeTime } from "@/lib/format";
+import { Switch } from "@/components/ui/switch";
+import { appFor, appName, duration, isOpenSearch, relativeTime } from "@/lib/format";
+import { byRating } from "@/lib/ratings";
 import { useTick } from "@/lib/useTick";
 import { cn } from "@/lib/utils";
 
@@ -22,12 +24,39 @@ const EXAMPLE_VIBE: Record<Kind, string> = {
   series: "something I can finish in a month",
 };
 
+const EXAMPLE_SEARCH: Record<Kind, string> = {
+  movies: "90s heist movies with a twist ending",
+  series: "short Korean thrillers",
+};
+
 const MIN_SCORES = ["0", "60", "70", "80", "90"];
+
+const USE_TASTE_KEY = "proposarr.useTaste";
 
 function matchesVerdict(p: Pick, v: VerdictFilter) {
   if (v === "all") return true;
   if (v === "none") return !p.verdict;
   return p.verdict === v;
+}
+
+/** "Use my taste", remembered across visits when storage is available. */
+function useTastePreference(): [boolean, (value: boolean) => void] {
+  const [value, setValue] = useState(() => {
+    try {
+      return localStorage.getItem(USE_TASTE_KEY) !== "false";
+    } catch {
+      return true;
+    }
+  });
+  const set = useCallback((next: boolean) => {
+    setValue(next);
+    try {
+      localStorage.setItem(USE_TASTE_KEY, String(next));
+    } catch {
+      // Private mode; the choice lasts for this page only.
+    }
+  }, []);
+  return [value, set];
 }
 
 export function PicksPage() {
@@ -55,13 +84,17 @@ export function PicksPage() {
   const { running } = useLive();
   const picks = usePicks({ kind, run: runParam === "latest" ? "latest" : Number(runParam), verdict: "all" });
   const [accepting, setAccepting] = useState<Pick | null>(null);
+  const [useTaste, setUseTaste] = useTastePreference();
 
   const app = appFor(kind);
   const configured = status.data ? status.data.connections[app] && status.data.connections.tmdb : true;
   const liveRun = Object.values(running).find((r) => r.kind === kind);
+  const runsById = useMemo(() => new Map((runs.data ?? []).map((r) => [r.id, r])), [runs.data]);
+  const liveSearch = liveRun ? (liveRun.useTaste !== undefined ? !liveRun.useTaste : isOpenSearch(runsById.get(liveRun.runId))) : false;
   const kindRuns = useMemo(() => (runs.data ?? []).filter((r) => r.kind === kind), [runs.data, kind]);
   const succeeded = kindRuns.filter((r) => r.status === "succeeded");
   const shownRun: Run | undefined = runParam === "latest" ? succeeded[0] : kindRuns.find((r) => r.id === Number(runParam));
+  const shownSearch = isOpenSearch(shownRun);
   // A failed or rate-limited run newer than the one on screen.
   const newerProblem = runParam === "latest" ? kindRuns.find((r) => (r.status === "failed" || r.status === "rate_limited") && (!shownRun || r.id > shownRun.id)) : undefined;
 
@@ -73,13 +106,23 @@ export function PicksPage() {
     ignored: all.filter((p) => p.verdict === "ignored").length,
     all: all.length,
   };
-  const visible = all.filter((p) => matchesVerdict(p, verdict) && p.score >= Number(minScore));
+  const filtered = all.filter((p) => matchesVerdict(p, verdict) && p.score >= Number(minScore));
+  // Open-search results are ranked by real ratings, as the server does; everything else keeps the API order.
+  const visible = shownSearch ? [...filtered].sort(byRating) : filtered;
 
   if (status.data?.setup_required) return <Navigate to="/setup" replace />;
 
   return (
     <>
-      <RunForm kind={kind} onKind={(k) => update({ kind: k, run: null })} configured={configured} liveRun={liveRun} />
+      <RunForm
+        kind={kind}
+        onKind={(k) => update({ kind: k, run: null })}
+        configured={configured}
+        liveRun={liveRun}
+        liveSearch={liveSearch}
+        useTaste={useTaste}
+        onUseTaste={setUseTaste}
+      />
 
       {!configured ? (
         <EmptyState
@@ -127,7 +170,7 @@ export function PicksPage() {
                   <SelectItem value="latest">Latest run</SelectItem>
                   {succeeded.map((r) => (
                     <SelectItem key={r.id} value={String(r.id)}>
-                      {r.vibe ? `“${r.vibe}”` : "By taste"}, {relativeTime(r.started_at)}
+                      {isOpenSearch(r) ? `Search “${r.vibe ?? ""}”` : r.vibe ? `“${r.vibe}”` : "By taste"}, {relativeTime(r.started_at)}
                     </SelectItem>
                   ))}
                 </Select>
@@ -137,8 +180,16 @@ export function PicksPage() {
 
           {shownRun && all.length > 0 && (
             <p className="mb-5 text-sm text-text-muted">
-              {shownRun.pick_count} picks {relativeTime(shownRun.finished_at ?? shownRun.started_at)}
-              {shownRun.vibe ? <> for <span className="text-text">“{shownRun.vibe}”</span></> : " by taste alone"}, chosen from {shownRun.candidate_count} candidates.
+              {shownSearch ? (
+                <>
+                  {shownRun.pick_count} picks for <span className="text-text">“{shownRun.vibe}”</span>, searched {relativeTime(shownRun.finished_at ?? shownRun.started_at)}.
+                </>
+              ) : (
+                <>
+                  {shownRun.pick_count} picks {relativeTime(shownRun.finished_at ?? shownRun.started_at)}
+                  {shownRun.vibe ? <> for <span className="text-text">“{shownRun.vibe}”</span></> : " by taste alone"}, chosen from {shownRun.candidate_count} candidates.
+                </>
+              )}
             </p>
           )}
 
@@ -148,10 +199,17 @@ export function PicksPage() {
             <ErrorNote title="Could not load picks" message={picks.error.message} onRetry={() => void picks.refetch()} />
           ) : all.length === 0 ? (
             <EmptyState icon={Clapperboard} title="No picks yet">
-              <p>
-                Describe a mood above, or leave it empty, and press Run now. Proposarr reads your {appName(app)} library and watch history and
-                asks Claude for {kind === "series" ? "series" : "movies"} you don't have yet.
-              </p>
+              {useTaste ? (
+                <p>
+                  Describe a mood above, or leave it empty, and press Run now. Proposarr reads your {appName(app)} library and watch history and
+                  asks Claude for {kind === "series" ? "series" : "movies"} you don't have yet.
+                </p>
+              ) : (
+                <p>
+                  Describe what you are looking for above and press Search. Claude suggests {kind === "series" ? "series" : "movies"} from the
+                  description alone and leaves out titles you already have.
+                </p>
+              )}
             </EmptyState>
           ) : visible.length === 0 ? (
             <EmptyState
@@ -178,7 +236,7 @@ export function PicksPage() {
                     animate={{ opacity: 1, y: 0, transition: { delay: Math.min(i, 12) * 0.025, duration: 0.3 } }}
                     exit={{ opacity: 0, scale: 0.94, transition: { duration: 0.18 } }}
                   >
-                    <PickCard pick={p} onAccept={setAccepting} />
+                    <PickCard pick={p} onAccept={setAccepting} openSearch={isOpenSearch(runsById.get(p.run_id))} />
                   </motion.li>
                 ))}
               </AnimatePresence>
@@ -197,69 +255,111 @@ function RunForm({
   onKind,
   configured,
   liveRun,
+  liveSearch,
+  useTaste,
+  onUseTaste,
 }: {
   kind: Kind;
   onKind: (k: Kind) => void;
   configured: boolean;
   liveRun?: { runId: number; message: string; startedAt?: string };
+  /** The live run is an open search. */
+  liveSearch: boolean;
+  useTaste: boolean;
+  onUseTaste: (value: boolean) => void;
 }) {
   const [vibe, setVibe] = useState("");
+  const [error, setError] = useState<string | null>(null);
   const start = useStartRun();
   const busy = !!liveRun || start.isPending;
+  const needsVibe = !useTaste && vibe.trim() === "";
+  const searching = liveRun ? liveSearch : !useTaste;
+  const noun = kind === "series" ? "series" : "movies";
   useTick(!!liveRun);
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (busy || !configured) return;
+    if (busy || !configured || needsVibe) return;
+    setError(null);
+    const description = vibe.trim();
     start.mutate(
-      { kind, vibe },
+      { kind, vibe, useTaste },
       {
-        onSuccess: () => toast(`Finding ${kind === "series" ? "series" : "movies"}`, { description: vibe ? `“${vibe.trim()}”` : "Going by your taste alone." }),
-        onError: (err) =>
+        onSuccess: () =>
+          useTaste
+            ? toast(`Finding ${noun}`, { description: description ? `“${description}”` : "Going by your taste alone." })
+            : toast(`Searching ${noun}`, { description: `“${description}”` }),
+        onError: (err) => {
+          if (!useTaste && err instanceof ApiError && err.status === 400) {
+            setError(err.message);
+            return;
+          }
           toast.error(err instanceof ApiError && err.status === 409 ? `A ${kind} run is already going` : "Could not start the run", {
             description: err.message,
-          }),
+          });
+        },
       },
     );
   };
 
   return (
     <section className="mb-10 lg:mb-12" aria-labelledby="vibe-label">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <Segmented
           label="Library"
           value={kind}
-          onChange={onKind}
+          onChange={(k) => {
+            setError(null);
+            onKind(k);
+          }}
           options={[
             { value: "movies", label: "Movies" },
             { value: "series", label: "Series" },
           ]}
         />
+        <Switch
+          checked={useTaste}
+          onCheckedChange={(v) => {
+            setError(null);
+            onUseTaste(v);
+          }}
+          aria-describedby="vibe-help"
+          className="-mr-2"
+        >
+          Use my taste
+        </Switch>
       </div>
       <form onSubmit={submit} className="mt-7">
         <label id="vibe-label" htmlFor="vibe" className="text-[15px] text-text-muted">
-          What are you in the mood for?
+          {useTaste ? "What are you in the mood for?" : "What are you looking for?"}
         </label>
         <div className="mt-2 flex flex-col gap-4 md:flex-row md:items-end">
           <input
             id="vibe"
             value={vibe}
-            onChange={(e) => setVibe(e.target.value)}
+            onChange={(e) => {
+              setVibe(e.target.value);
+              setError(null);
+            }}
             maxLength={200}
             autoComplete="off"
-            placeholder={EXAMPLE_VIBE[kind]}
+            placeholder={useTaste ? EXAMPLE_VIBE[kind] : EXAMPLE_SEARCH[kind]}
             disabled={!configured}
+            required={!useTaste}
+            aria-invalid={error ? true : undefined}
+            aria-describedby="vibe-help"
             className={cn(
               "min-w-0 flex-1 border-b-2 border-border bg-transparent pb-2 font-display text-[40px] leading-[1.05] font-bold tracking-tight text-text transition-colors",
               "placeholder:text-text-muted/25 hover:border-text-muted/50 focus:border-accent focus:outline-none disabled:opacity-50 sm:text-[56px] xl:text-[68px]",
+              "aria-[invalid=true]:border-danger",
             )}
           />
-          <Button type="submit" variant="primary" size="lg" disabled={busy || !configured} className="md:mb-2">
-            {busy ? <Loader2 className="animate-spin" /> : null}
-            {busy ? "Running" : "Run now"}
+          <Button type="submit" variant="primary" size="lg" disabled={busy || !configured || needsVibe} className="md:mb-2">
+            {busy ? <Loader2 className="animate-spin" /> : searching ? <Search /> : null}
+            {busy ? (searching ? "Searching" : "Running") : useTaste ? "Run now" : "Search"}
           </Button>
         </div>
-        <div className="mt-3 min-h-6 text-sm text-text-muted" aria-live="polite">
+        <div id="vibe-help" className="mt-3 min-h-6 text-sm text-text-muted" aria-live="polite">
           {liveRun ? (
             <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <span className="size-2 animate-pulse-dot rounded-full bg-accent" />
@@ -269,8 +369,21 @@ function RunForm({
                 See run
               </Link>
             </span>
-          ) : (
+          ) : error ? (
+            <p role="alert" className="flex items-start gap-2 text-danger">
+              <AlertCircle className="mt-0.5 size-4 shrink-0" />
+              <span className="break-words">{error}</span>
+            </p>
+          ) : useTaste ? (
             <span>Leave it empty to go by your taste alone. A run takes a minute or two.</span>
+          ) : (
+            <span className="flex flex-col gap-0.5">
+              <span>Claude searches by your description only, not your library or history. Titles you already have are left out.</span>
+              {/* Same height either way, so typing the first letter does not move the page. */}
+              <span className={needsVibe ? "text-text" : undefined}>
+                {needsVibe ? "Describe what you want to find to start a search." : "A search takes a minute or two."}
+              </span>
+            </span>
           )}
         </div>
       </form>

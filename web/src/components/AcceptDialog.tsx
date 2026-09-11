@@ -5,6 +5,7 @@ import { ApiError } from "@/api/client";
 import { useAppOptions, useRequestPick } from "@/api/queries";
 import type { Pick } from "@/api/types";
 import { appFor, appName, gigabytes } from "@/lib/format";
+import { TitleLinks } from "./PickMeta";
 import { Poster } from "./Poster";
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "./ui/dialog";
@@ -72,7 +73,8 @@ function AcceptForm({ pick, onClose }: { pick: Pick; onClose: () => void }) {
               {pick.title}
               {pick.year && <span className="nums ml-2 text-text-muted">{pick.year}</span>}
             </DialogTitle>
-            <DialogDescription id="accept-description" className="mt-2">
+            <TitleLinks pick={pick} tone="surface" className="mt-2.5" />
+            <DialogDescription id="accept-description" className="mt-2.5">
               Choose the quality profile {name} uses for this title. It is asked for every title you add.
             </DialogDescription>
           </div>

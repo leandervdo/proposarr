@@ -1,5 +1,5 @@
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { Check, ChevronDown, Gauge, History, X } from "lucide-react";
+import { Check, ChevronDown, Gauge, History, Search, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { useLive } from "@/api/live";
@@ -8,7 +8,7 @@ import type { Run } from "@/api/types";
 import { EmptyState, ErrorNote } from "@/components/EmptyState";
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
-import { cost, duration, kindLabel, relativeTime, tokens } from "@/lib/format";
+import { cost, duration, isOpenSearch, kindLabel, relativeTime, tokens } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 export function RunsPage() {
@@ -72,6 +72,7 @@ function RunRow({ run, message }: { run: Run; message?: string }) {
   const warnings = run.warnings ?? [];
   const rejected = run.rejected ?? [];
   const extra = warnings.length + rejected.length;
+  const search = isOpenSearch(run);
 
   return (
     <li className="relative pb-5 pl-12 last:pb-0">
@@ -80,7 +81,17 @@ function RunRow({ run, message }: { run: Run; message?: string }) {
         <header className="flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4">
           <h2 className="min-w-0 text-[17px] leading-snug font-semibold">
             {kindLabel(run.kind)}
-            <span className="font-normal text-text-muted">{run.vibe ? <> for “{run.vibe}”</> : " by taste"}</span>
+            {search ? (
+              <>
+                <span className="mx-2 inline-flex -translate-y-px items-center gap-1 rounded-full border border-border px-2 py-0.5 align-middle text-[11px] leading-tight font-medium text-text-muted">
+                  <Search aria-hidden className="size-3" />
+                  Search
+                </span>
+                <span className="font-normal text-text-muted">“{run.vibe}”</span>
+              </>
+            ) : (
+              <span className="font-normal text-text-muted">{run.vibe ? <> for “{run.vibe}”</> : " by taste"}</span>
+            )}
           </h2>
           <p className="shrink-0 text-sm text-text-muted">
             <span className={cn("font-medium", statusTone(run.status))}>{STATUS_LABEL[run.status]}</span>{" "}
@@ -113,7 +124,10 @@ function RunRow({ run, message }: { run: Run; message?: string }) {
           <Stat label="Tokens in" value={tokens(run.input_tokens)} />
           <Stat label="Tokens out" value={tokens(run.output_tokens)} />
           <Stat label="Turns" value={String(run.num_turns)} />
-          <Stat label="Picks" value={run.status === "succeeded" ? `${run.pick_count} of ${run.candidate_count}` : "–"} />
+          <Stat
+            label="Picks"
+            value={run.status !== "succeeded" ? "–" : search && run.candidate_count === 0 ? String(run.pick_count) : `${run.pick_count} of ${run.candidate_count}`}
+          />
         </dl>
 
         {(extra > 0 || run.status === "succeeded") && (

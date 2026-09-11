@@ -4,16 +4,20 @@ import { toast } from "sonner";
 import { useSetVerdict } from "@/api/queries";
 import type { Pick, Verdict } from "@/api/types";
 import { appFor, appName, shortDate } from "@/lib/format";
+import { ratingScore } from "@/lib/ratings";
 import { cn } from "@/lib/utils";
+import { RatingChips, TitleLinks } from "./PickMeta";
 import { Poster } from "./Poster";
 import { Button } from "./ui/button";
 
 interface PickCardProps {
   pick: Pick;
   onAccept: (pick: Pick) => void;
+  /** The pick comes from an open search: every pick is free and the score comes from ratings. */
+  openSearch?: boolean;
 }
 
-export function PickCard({ pick, onAccept }: PickCardProps) {
+export function PickCard({ pick, onAccept, openSearch = false }: PickCardProps) {
   const [revealed, setRevealed] = useState(false);
   const setVerdict = useSetVerdict();
   const app = appName(appFor(pick.kind));
@@ -44,7 +48,8 @@ export function PickCard({ pick, onAccept }: PickCardProps) {
       <div
         className="relative"
         onPointerUp={(e) => {
-          if (e.pointerType === "touch" && !(e.target as HTMLElement).closest("button")) setRevealed((r) => !r);
+          // Buttons and links act on their own; they must not toggle the details.
+          if (e.pointerType === "touch" && !(e.target as HTMLElement).closest("button, a")) setRevealed((r) => !r);
         }}
       >
         <Poster
@@ -56,9 +61,12 @@ export function PickCard({ pick, onAccept }: PickCardProps) {
           )}
         />
 
-        <ScoreBadge score={pick.score} />
-        {pick.source === "free" && (
-          <span className="absolute top-2.5 right-2.5 rounded-full bg-black/55 px-2 py-0.5 text-[11px] font-medium text-white/90 backdrop-blur-md">
+        <ScoreBadge
+          score={pick.score}
+          label={openSearch && ratingScore(pick.ratings) !== undefined ? "Score from IMDb and Rotten Tomatoes" : "Claude's match score"}
+        />
+        {pick.source === "free" && !openSearch && (
+          <span className="absolute top-2.5 right-2.5 z-10 rounded-full bg-black/55 px-2 py-0.5 text-[11px] font-medium text-white/90 backdrop-blur-md">
             Outside the list
           </span>
         )}
@@ -73,7 +81,8 @@ export function PickCard({ pick, onAccept }: PickCardProps) {
         {/* Details and actions: hover or focus on desktop, tap on touch */}
         <div
           className={cn(
-            "absolute inset-0 flex flex-col justify-end rounded-[var(--radius-poster)] bg-[rgb(var(--scrim)/0.88)] p-3 text-white opacity-0 backdrop-blur-[2px] transition-opacity duration-200",
+            // pt-14 keeps the overview clear of the score badge, which stays on top.
+            "absolute inset-0 flex flex-col justify-end rounded-[var(--radius-poster)] bg-[rgb(var(--scrim)/0.88)] p-3 pt-14 text-white opacity-0 backdrop-blur-[2px] transition-opacity duration-200",
             "group-focus-within/card:opacity-100 [@media(hover:hover)]:group-hover/card:opacity-100",
             revealed ? "opacity-100" : "pointer-events-none group-focus-within/card:pointer-events-auto [@media(hover:hover)]:group-hover/card:pointer-events-auto",
           )}
@@ -84,6 +93,7 @@ export function PickCard({ pick, onAccept }: PickCardProps) {
             <Tv className="size-3.5 shrink-0" />
             <span className="line-clamp-1">{pick.streaming && pick.streaming.length > 0 ? `Streams on ${pick.streaming.join(", ")}` : "Not on a streaming service here"}</span>
           </p>
+          <TitleLinks pick={pick} tone="poster" className="mt-2" />
 
           <div className="mt-3 flex items-center gap-1.5">
             {added ? (
@@ -119,9 +129,10 @@ export function PickCard({ pick, onAccept }: PickCardProps) {
           <span className="line-clamp-1">{pick.title}</span>
           {pick.year && <span className="nums text-[13px] font-normal text-text-muted">{pick.year}</span>}
         </h3>
+        <RatingChips ratings={pick.ratings} />
         <p className="line-clamp-2 text-[13px] leading-snug text-text-muted">{pick.reason}</p>
         {pick.related_to && pick.related_to.length > 0 && (
-          <ul className="mt-0.5 flex flex-wrap gap-1" aria-label="Related to your library">
+          <ul className="mt-0.5 flex flex-wrap gap-1" aria-label={openSearch ? "Related titles" : "Related to your library"}>
             {pick.related_to.map((t) => (
               <li key={t} className="max-w-full truncate rounded-full border border-border px-2 py-0.5 text-[11px] text-text-muted">
                 {t.replace(/\s\(\d{4}\)$/, "")}
@@ -134,15 +145,18 @@ export function PickCard({ pick, onAccept }: PickCardProps) {
   );
 }
 
-function ScoreBadge({ score }: { score: number }) {
+function ScoreBadge({ score, label }: { score: number; label: string }) {
   const high = score >= 90;
   return (
     <div
       className={cn(
-        "absolute top-2.5 left-2.5 flex h-9 min-w-9 items-center justify-center rounded-[7px] px-1.5 font-display text-[22px] leading-none font-bold backdrop-blur-md",
+        // Above the details overlay so the score and its tooltip stay available on hover.
+        "absolute top-2.5 left-2.5 z-10 flex h-9 min-w-9 items-center justify-center rounded-[7px] px-1.5 font-display text-[22px] leading-none font-bold backdrop-blur-md",
         high ? "bg-accent text-accent-contrast" : "bg-black/60 text-white",
       )}
-      title={`Score ${score} of 100`}
+      role="img"
+      aria-label={`${label}: ${score} of 100`}
+      title={`${label}: ${score} of 100`}
     >
       <span className="nums">{score}</span>
     </div>

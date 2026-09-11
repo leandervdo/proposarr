@@ -8,6 +8,8 @@ interface LiveRun {
   runId: number;
   kind: Kind;
   vibe?: string;
+  /** Unknown when only progress events were seen. */
+  useTaste?: boolean;
   startedAt?: string;
   message: string;
 }
@@ -34,7 +36,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
           case "run.started":
             setRunning((r) => ({
               ...r,
-              [e.data.id]: { runId: e.data.id, kind: e.data.kind, vibe: e.data.vibe, startedAt: e.data.started_at, message: "Starting…" },
+              [e.data.id]: { runId: e.data.id, kind: e.data.kind, vibe: e.data.vibe, useTaste: e.data.use_taste, startedAt: e.data.started_at, message: "Starting…" },
             }));
             void qc.invalidateQueries({ queryKey: keys.runs });
             break;

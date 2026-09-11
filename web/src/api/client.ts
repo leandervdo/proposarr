@@ -79,7 +79,8 @@ export const api = {
   config: () => request<AppConfig>("GET", "/api/config"),
   runs: (limit = 50) => request<Run[]>("GET", `/api/runs?limit=${limit}`),
   run: (id: number) => request<{ run: Run; picks: Pick[] }>("GET", `/api/runs/${id}`),
-  startRun: (kind: Kind, vibe: string) => request<Run>("POST", "/api/runs", { kind, vibe: vibe.trim() || undefined }),
+  startRun: (kind: Kind, vibe: string, useTaste = true) =>
+    request<Run>("POST", "/api/runs", { kind, vibe: vibe.trim() || undefined, use_taste: useTaste }),
   picks: ({ kind, run, verdict }: PicksQuery) => {
     const q = new URLSearchParams();
     if (kind) q.set("kind", kind);

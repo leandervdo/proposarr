@@ -1,4 +1,16 @@
-import type { App, Kind } from "@/api/types";
+import type { App, Kind, Run } from "@/api/types";
+
+/** A run driven only by its description, not the library or history. Older servers omit use_taste. */
+export function isOpenSearch(run?: Pick<Run, "use_taste">): boolean {
+  return run?.use_taste === false;
+}
+
+const compact = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
+
+/** 2275363 → "2.3M" */
+export function compactNumber(n: number): string {
+  return compact.format(n);
+}
 
 const ZERO_TIME = "0001-01-01";
 

@@ -46,7 +46,7 @@ export const useTestService = () =>
 export function useStartRun() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ kind, vibe }: { kind: Kind; vibe: string }) => api.startRun(kind, vibe),
+    mutationFn: ({ kind, vibe, useTaste = true }: { kind: Kind; vibe: string; useTaste?: boolean }) => api.startRun(kind, vibe, useTaste),
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: keys.runs });
       void qc.invalidateQueries({ queryKey: keys.status });
