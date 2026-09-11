@@ -9,22 +9,20 @@ Your Plex or Jellyfin watch history is the main taste signal. Claude, run headle
 | Knows what you own, not what you watched | Plex or Jellyfin watch history is the primary taste signal |
 | Aggregates TMDB "recommended" counts | Candidates are ranked by Claude against a taste profile |
 | No reasoning | Every pick names the library titles it relates to |
-| No memory of ignored titles | Accept, ignore and later verdicts persist per TMDB id (planned) |
+| No memory of ignored titles | Accept, ignore and later verdicts persist per TMDB id |
 | No intent input | Free-text "vibe" per run |
 | Movies only | Series and movies |
 
 ## Status
 
-Early development. The command-line tool (milestone 1) is in place; state, the web UI and scheduling are not built yet.
+Early development, not released yet. Working today: the web UI (picks, runs, library, connections, settings and first-run setup), the CLI, saved runs and verdicts, and the Docker image. Not built yet: the model's lookup tools and scheduled runs.
 
-Planned milestones:
-
-1. **CLI recommends.** `proposarr run` prints picks for your real library.
-2. **State.** SQLite store, verdicts, run log with cost.
-3. **MCP toolbox.** Read-only library, history and TMDB tools for the model.
-4. **Web UI.** Poster grid of picks, runs timeline, connections and settings.
-5. **Scheduling and usage.** Scheduled runs, subscription usage, notifications.
-6. **Ship.** Versioned releases. The Docker image, compose example and CI already exist.
+1. **CLI recommends.** Done.
+2. **State.** SQLite store, verdicts, run log with cost. Done.
+3. **MCP toolbox.** Read-only library, history and TMDB tools for the model. Planned.
+4. **Web UI.** Poster grid of picks, runs timeline, editable connections and settings, first-run setup. Done.
+5. **Scheduling and usage.** Scheduled runs, subscription usage, notifications. Planned.
+6. **Ship.** Versioned releases on Docker Hub, Unraid template. In progress.
 
 ## Requirements
 
@@ -171,6 +169,17 @@ Then open `http://<host>:8585` and fill in the connections in the web UI. See [`
   ```
 
   `-it` is needed for `--add`, because every title you add asks for a quality profile.
+
+### Unraid
+
+Until Proposarr is listed in Community Applications, install the template by hand. In the Unraid terminal:
+
+```sh
+wget -O /boot/config/plugins/dockerMan/templates-user/my-proposarr.xml \
+  https://raw.githubusercontent.com/leandervdo/proposarr/main/unraid/proposarr.xml
+```
+
+Then open **Docker → Add Container**, choose **proposarr** under **Template**, check the appdata path and press **Apply**. Open the WebUI from the container's menu and follow the setup. `PUID` and `PGID` default to 99 and 100; the web login, Claude token and secret key are optional and under **Show more settings**.
 
 ## Credits
 
