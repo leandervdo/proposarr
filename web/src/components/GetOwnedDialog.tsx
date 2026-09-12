@@ -30,11 +30,20 @@ export interface GetOwnedRequest {
  * on the one it has in Radarr, and "if nothing fits" choice. Proposarr monitors each when needed, sets the profile and
  * starts Radarr's search; after submitting, each row follows its movie live.
  */
-export function GetOwnedDialog({ request, onClose }: { request: GetOwnedRequest | null; onClose: () => void }) {
+export function GetOwnedDialog({
+  request,
+  onSubmitted,
+  onClose,
+}: {
+  request: GetOwnedRequest | null;
+  /** The searches were sent, so a selection of these movies is done. */
+  onSubmitted?: () => void;
+  onClose: () => void;
+}) {
   return (
     <Dialog open={request !== null} onOpenChange={(open) => !open && onClose()}>
       {/* Mounted per opening, so every movie starts on its current profile. */}
-      {request && <GetOwnedFlow titles={request.titles} onClose={onClose} />}
+      {request && <GetOwnedFlow titles={request.titles} onSubmitted={onSubmitted} onClose={onClose} />}
     </Dialog>
   );
 }
@@ -47,7 +56,7 @@ type RowPhase =
   | { phase: "gone"; message: string }
   | { phase: "error"; message: string };
 
-function GetOwnedFlow({ titles, onClose }: GetOwnedRequest & { onClose: () => void }) {
+function GetOwnedFlow({ titles, onSubmitted, onClose }: GetOwnedRequest & { onSubmitted?: () => void; onClose: () => void }) {
   const options = useAppOptions("radarr", true);
   const config = useConfig();
   const searchMovie = useSearchOwnedMovie();
@@ -107,6 +116,7 @@ function GetOwnedFlow({ titles, onClose }: GetOwnedRequest & { onClose: () => vo
     const rows = titles.map((t) => ({ t, profileId: Number(choiceFor(t).profileId), fits: fitsFor(t) }));
     setSubmitted(true);
     setPhases(Object.fromEntries(titles.map((t) => [t.tmdb_id, { phase: "queued" }])));
+    onSubmitted?.();
 
     const results = await mapLimit(rows, CONCURRENCY, async ({ t, profileId, fits }) => {
       setPhase(t.tmdb_id, { phase: "starting" });

@@ -12,7 +12,7 @@ import {
   Search,
   type LucideIcon,
 } from "lucide-react";
-import { useId, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { useOwned } from "@/api/queries";
 import type { OwnedStatus, OwnedTitle, ReleaseCheck, Run } from "@/api/types";
@@ -20,9 +20,11 @@ import type { StatusTone } from "@/lib/bulkAdd";
 import { appFor, appName, plural } from "@/lib/format";
 import { canGet, isOnHold, ownedStatusLabel, shownSearch } from "@/lib/owned";
 import { useTitleLink } from "@/lib/titleModal";
+import { useSelection } from "@/lib/useSelection";
 import { cn } from "@/lib/utils";
 import { GetOwnedDialog, type GetOwnedRequest } from "./GetOwnedDialog";
 import { Poster } from "./Poster";
+import { SelectCheck, type CardSelection } from "./SelectCheck";
 import { Button } from "./ui/button";
 
 /** Columns per breakpoint. Collapsed, only the first row shows (pastFirstRow). */
@@ -80,7 +82,8 @@ const SEARCH_ICON: Record<ReleaseCheck["status"], LucideIcon> = {
 
 /**
  * The library titles an open search matched, with their live state in Radarr/Sonarr. The search leaves them out of
- * its picks, so this says you already have them, and gets the movies that aren't on disk.
+ * its picks, so this says you already have them, and gets the movies that aren't on disk: all of them, or the ones
+ * you select.
  */
 export function OwnedPanel({ run, hasPicks }: { run: Run; hasPicks: boolean }) {
   const matches = run.owned ?? [];
@@ -88,9 +91,12 @@ export function OwnedPanel({ run, hasPicks }: { run: Run; hasPicks: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const [getting, setGetting] = useState<GetOwnedRequest | null>(null);
   const id = useId();
+  // Only movies Get can fetch take part in the selection, in the order they show.
+  const selectable = useMemo(() => (owned.data ?? []).filter(canGet).map((t) => ({ id: t.tmdb_id, title: t })), [owned.data]);
+  const selection = useSelection(selectable, String(run.id));
   const series = run.kind === "series";
   const count = owned.data?.length ?? matches.length;
-  const gettable = (owned.data ?? []).filter(canGet);
+  const gettable = selectable.map((s) => s.title);
 
   if (count === 0) return null;
 
@@ -103,12 +109,41 @@ export function OwnedPanel({ run, hasPicks }: { run: Run; hasPicks: boolean }) {
           </h2>
           <p className="mt-1.5 text-sm text-text-muted">
             {count === 1 ? "It's" : "They're"} left out of the picks{hasPicks ? " below" : ""}.
+            {gettable.length > 1 && " Select the ones you want to get only those."}
           </p>
         </div>
-        {gettable.length > 0 && (
-          <Button variant="primary" size="sm" className="self-start" onClick={() => setGetting({ titles: gettable })}>
-            <Download /> Get {gettable.length} missing
-          </Button>
+        {selection.active ? (
+          <div role="toolbar" aria-label="Selected movies" className="flex flex-wrap items-center gap-1.5 self-start">
+            <p aria-live="polite" aria-atomic="true" className="flex items-baseline gap-1.5 pr-1.5 whitespace-nowrap">
+              <span className="nums font-display text-[22px] leading-none font-bold text-accent">{selection.count}</span>
+              <span className="text-sm font-medium">selected</span>
+            </p>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={selection.allSelected}
+              onClick={() => {
+                // Every selected movie should be visible.
+                selection.selectAll();
+                setExpanded(true);
+              }}
+            >
+              Select all
+              <span className="nums text-xs text-text-muted">{selection.total}</span>
+            </Button>
+            <Button variant="ghost" size="sm" onClick={selection.clear}>
+              Clear
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => setGetting({ titles: selection.selected.map((s) => s.title) })}>
+              <Download /> Get {selection.count}
+            </Button>
+          </div>
+        ) : (
+          gettable.length > 0 && (
+            <Button variant="primary" size="sm" className="self-start" onClick={() => setGetting({ titles: gettable })}>
+              <Download /> Get {gettable.length} missing
+            </Button>
+          )
         )}
       </header>
 
@@ -136,11 +171,22 @@ export function OwnedPanel({ run, hasPicks }: { run: Run; hasPicks: boolean }) {
       ) : (
         <>
           <ul id={`${id}-list`} className={GRID}>
-            {owned.data.map((t, i) => (
-              <li key={`${t.kind}:${t.tmdb_id}`} className={cn(!expanded && pastFirstRow(i))}>
-                <OwnedCard title={t} onGet={canGet(t) ? () => setGetting({ titles: [t] }) : undefined} />
-              </li>
-            ))}
+            {owned.data.map((t, i) => {
+              const gettableCard = canGet(t);
+              return (
+                <li key={`${t.kind}:${t.tmdb_id}`} className={cn(!expanded && pastFirstRow(i))}>
+                  <OwnedCard
+                    title={t}
+                    onGet={gettableCard && !selection.active ? () => setGetting({ titles: [t] }) : undefined}
+                    selection={
+                      gettableCard
+                        ? { selected: selection.isSelected(t.tmdb_id), active: selection.active, onToggle: (range) => selection.toggle(t.tmdb_id, range) }
+                        : undefined
+                    }
+                  />
+                </li>
+              );
+            })}
           </ul>
           <Button
             variant="ghost"
@@ -155,12 +201,21 @@ export function OwnedPanel({ run, hasPicks }: { run: Run; hasPicks: boolean }) {
         </>
       )}
 
-      <GetOwnedDialog request={getting} onClose={() => setGetting(null)} />
+      <GetOwnedDialog request={getting} onSubmitted={selection.clear} onClose={() => setGetting(null)} />
     </section>
   );
 }
 
-function OwnedCard({ title, onGet }: { title: OwnedTitle; onGet?: () => void }) {
+function OwnedCard({
+  title,
+  onGet,
+  selection,
+}: {
+  title: OwnedTitle;
+  onGet?: () => void;
+  /** Movies Get can fetch: a checkbox on the corner, and clicks toggle while anything is selected. */
+  selection?: CardSelection;
+}) {
   const titleLink = useTitleLink();
   const link = titleLink({ kind: title.kind, tmdbId: title.tmdb_id });
   const label = ownedStatusLabel(title);
@@ -168,12 +223,34 @@ function OwnedCard({ title, onGet }: { title: OwnedTitle; onGet?: () => void }) 
   const onHold = isOnHold(title);
   const Icon = check ? SEARCH_ICON[check.status] : onHold ? Clock : STATUS_ICON[title.status];
   const progress = title.status === "downloading" && !onHold ? title.radarr?.queue?.progress : undefined;
+  const selecting = selection?.active ?? false;
 
   return (
-    // The Get button sits beside the link rather than in it: a button inside a link is not allowed.
-    <div className="relative">
-      <Link to={link.to} state={link.state} className="group block rounded-[var(--radius-poster)] focus-visible:outline-offset-4">
-        <div className="relative">
+    // The checkbox and Get button sit beside the link rather than in it: a button inside a link is not allowed.
+    <div className="group/select relative">
+      {selection && <SelectCheck title={title.title} checked={selection.selected} shown={selecting} onToggle={selection.onToggle} className="ring-surface" />}
+      <Link
+        to={link.to}
+        state={link.state}
+        onMouseDown={(e) => {
+          if (selection && e.shiftKey) e.preventDefault();
+        }}
+        onClick={(e) => {
+          // While anything is selected a click toggles instead of opening; shift+click selects a range.
+          if (!selection || e.metaKey || e.ctrlKey || e.altKey) return;
+          if (!selecting && !e.shiftKey) return;
+          e.preventDefault();
+          selection.onToggle(e.shiftKey);
+        }}
+        onKeyDown={(e) => {
+          if (selection && e.key === " ") {
+            e.preventDefault();
+            selection.onToggle(e.shiftKey);
+          }
+        }}
+        className="group block rounded-[var(--radius-poster)] focus-visible:outline-offset-4"
+      >
+        <div className={cn("relative rounded-[var(--radius-poster)] ring-offset-[3px] ring-offset-surface", selection?.selected && "ring-2 ring-accent")}>
           <Poster src={title.poster_url} title={title.title} className="transition-shadow duration-300 group-hover:shadow-[0_14px_32px_-16px_rgb(0_0_0/0.7)]" />
           {progress !== undefined && (
             <div aria-hidden className="absolute inset-x-2 bottom-2 h-1 overflow-hidden rounded-full bg-black/50">
