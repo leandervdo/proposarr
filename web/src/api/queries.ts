@@ -6,7 +6,7 @@ import {
   type InfiniteData,
   type QueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { ApiError, api, type PicksPage, type PicksQuery } from "./client";
 import type { App, IfNothingFits, Kind, Library, LibraryTitle, Pick, Service, SettingValues, Verdict } from "./types";
 
@@ -176,6 +176,29 @@ export function usePick(id: number | undefined, kind: Kind | undefined) {
     enabled: id !== undefined && kind !== undefined && !cached,
   });
   return { pick: cached, isPending: id !== undefined && !cached && fallback.isPending && fallback.fetchStatus !== "idle" };
+}
+
+/**
+ * Several picks by id, kept live from the cached lists like usePick (the bulk add dialog). An entry is
+ * undefined while no list holds that pick.
+ */
+export function useCachedPicks(ids: readonly number[]): (Pick | undefined)[] {
+  const qc = useQueryClient();
+  const idsKey = ids.join(",");
+  const subscribe = useCallback((onChange: () => void) => qc.getQueryCache().subscribe(onChange), [qc]);
+  const snapshot = useMemo(() => cachedPicksGetter(qc, idsKey ? idsKey.split(",").map(Number) : []), [qc, idsKey]);
+  return useSyncExternalStore(subscribe, snapshot);
+}
+
+/** Reads the cached picks for `ids`, returning the same array while none of them changed (useSyncExternalStore needs that). */
+function cachedPicksGetter(qc: QueryClient, ids: readonly number[]): () => (Pick | undefined)[] {
+  let last: (Pick | undefined)[] = [];
+  return () => {
+    const next = ids.map((id) => findCachedPick(qc, id));
+    if (next.length === last.length && next.every((p, i) => p === last[i])) return last;
+    last = next;
+    return next;
+  };
 }
 
 /** A library title already in the cache, for the modal's fallback when details fail. */

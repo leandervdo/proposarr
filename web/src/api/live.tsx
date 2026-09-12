@@ -1,9 +1,9 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { settleRelease } from "@/lib/releases";
 import { subscribe } from "./events";
 import { applyPick, keys } from "./queries";
-import type { Kind, Run } from "./types";
+import type { Kind, Pick, Run } from "./types";
 
 interface LiveRun {
   runId: number;
@@ -60,8 +60,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
             void qc.invalidateQueries({ queryKey: ["library"] });
             break;
           case "pick.updated":
-            applyPick(qc, e.data);
-            settleRelease(e.data);
+            queuePickEvent(qc, e.data);
             break;
         }
       }, setConnected),
@@ -73,3 +72,24 @@ export function LiveProvider({ children }: { children: ReactNode }) {
 }
 
 export const useLive = () => useContext(LiveContext);
+
+/** pick.updated events are applied one after another, so a later event never lands before an earlier one. */
+let pickEvents = Promise.resolve();
+
+function queuePickEvent(qc: QueryClient, pick: Pick) {
+  pickEvents = pickEvents.then(() => applyPickEvent(qc, pick)).catch(() => {});
+}
+
+/**
+ * Writes a pick.updated event into every cached list. A picks refetch that started before the event can
+ * resolve after it and put the old state back (a release check back on "checking"), so in-flight picks
+ * queries are cancelled first (reverting to their data from before the fetch, manual writes included), then
+ * the event's pick is written, and the cancelled lists are refetched: the server already has the new state.
+ */
+async function applyPickEvent(qc: QueryClient, pick: Pick) {
+  const inFlight = qc.isFetching({ queryKey: ["picks"] }) > 0;
+  await qc.cancelQueries({ queryKey: ["picks"] });
+  applyPick(qc, pick);
+  settleRelease(pick);
+  if (inFlight) void qc.invalidateQueries({ queryKey: ["picks"] });
+}

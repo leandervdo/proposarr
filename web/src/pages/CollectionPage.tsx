@@ -8,13 +8,19 @@ import { EmptyState, ErrorNote } from "@/components/EmptyState";
 import { PageHeader } from "@/components/PageHeader";
 import { RatingChips } from "@/components/PickMeta";
 import { Poster } from "@/components/Poster";
+import { SelectCheck, type CardSelection } from "@/components/SelectCheck";
+import { SelectionBar } from "@/components/SelectionBar";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/segmented";
 import { appFor, appName, dateLabel, plural, relativeTime } from "@/lib/format";
 import { useTitleLink } from "@/lib/titleModal";
+import { useSelection, type Selection } from "@/lib/useSelection";
 import { cn } from "@/lib/utils";
 
 type PagesQuery = ReturnType<typeof usePickPages>;
+
+/** Stable empty list for the selection while the Added tab is open. */
+const NO_PICKS: Pick[] = [];
 
 const GRID = "grid grid-cols-2 gap-x-4 gap-y-9 sm:grid-cols-3 sm:gap-x-5 md:grid-cols-4 lg:grid-cols-5 2xl:grid-cols-7";
 
@@ -25,6 +31,10 @@ export function CollectionPage() {
   const added = usePickPages({ kind, run: "all", added: true, distinct: true });
   const searches = usePickPages({ kind, run: "all", search: true });
   const app = appName(appFor(kind));
+  const groups = useSearchGroups(searches);
+  const searchPicks = useMemo(() => groups.flatMap((g) => g.picks), [groups]);
+  // Only the Searches tab selects; another kind or tab starts empty.
+  const selection = useSelection(tab === "searches" ? searchPicks : NO_PICKS, `${kind}:${tab}`);
 
   const update = (next: Record<string, string | null>) =>
     setParams(
@@ -67,9 +77,11 @@ export function CollectionPage() {
           <AddedPanel query={added} kind={kind} />
         </Tabs.Content>
         <Tabs.Content value="searches" className="focus-visible:outline-none">
-          <SearchesPanel query={searches} kind={kind} />
+          <SearchesPanel query={searches} groups={groups} kind={kind} selection={selection} />
         </Tabs.Content>
       </Tabs.Root>
+
+      {tab === "searches" && <SelectionBar selection={selection} kind={kind} />}
     </>
   );
 }
@@ -136,8 +148,9 @@ interface SearchGroup {
   picks: Pick[];
 }
 
-function SearchesPanel({ query, kind }: { query: PagesQuery; kind: Kind }) {
-  const groups = useMemo(() => {
+/** Open-search picks grouped by search, newest search first. */
+function useSearchGroups(query: PagesQuery): SearchGroup[] {
+  return useMemo(() => {
     const byRun = new Map<number, SearchGroup>();
     for (const p of query.data?.pages.flatMap((page) => page.picks) ?? []) {
       const group = byRun.get(p.run_id) ?? { runId: p.run_id, vibe: p.run_vibe, foundAt: p.found_at, picks: [] };
@@ -146,7 +159,9 @@ function SearchesPanel({ query, kind }: { query: PagesQuery; kind: Kind }) {
     }
     return [...byRun.values()].sort((a, b) => (b.foundAt ?? "").localeCompare(a.foundAt ?? "") || b.runId - a.runId);
   }, [query.data]);
+}
 
+function SearchesPanel({ query, groups, kind, selection }: { query: PagesQuery; groups: SearchGroup[]; kind: Kind; selection: Selection<Pick> }) {
   if (query.isPending) return <GridSkeleton />;
   if (query.isError) return <ErrorNote title="Could not load searches" message={query.error.message} onRetry={() => void query.refetch()} />;
   if (groups.length === 0) {
@@ -201,7 +216,11 @@ function SearchesPanel({ query, kind }: { query: PagesQuery; kind: Kind }) {
             <ul className={GRID}>
               {g.picks.map((p) => (
                 <li key={p.id}>
-                  <CollectionCard pick={p} showState />
+                  <CollectionCard
+                    pick={p}
+                    showState
+                    selection={{ selected: selection.isSelected(p.id), active: selection.active, onToggle: (range) => selection.toggle(p.id, range) }}
+                  />
                 </li>
               ))}
             </ul>
@@ -213,31 +232,74 @@ function SearchesPanel({ query, kind }: { query: PagesQuery; kind: Kind }) {
   );
 }
 
-function CollectionCard({ pick, footer, showState = false }: { pick: Pick; footer?: ReactNode; showState?: boolean }) {
+function CollectionCard({
+  pick,
+  footer,
+  showState = false,
+  selection,
+}: {
+  pick: Pick;
+  footer?: ReactNode;
+  showState?: boolean;
+  /** Multi-select (Searches tab): a checkbox on the corner, and clicks toggle while anything is selected. */
+  selection?: CardSelection;
+}) {
   const titleLink = useTitleLink();
   const link = titleLink({ kind: pick.kind, tmdbId: pick.tmdb_id, pickId: pick.id });
+  const selecting = selection?.active ?? false;
   return (
-    <Link to={link.to} state={link.state} className="group block rounded-[var(--radius-poster)] focus-visible:outline-offset-4">
-      <div className="relative transition-[translate] duration-300 group-hover:-translate-y-1">
-        <Poster
-          src={pick.poster_url}
-          title={pick.title}
+    // The checkbox sits beside the link rather than in it: a button inside a link is not allowed.
+    <div className="group/select relative">
+      {selection && (
+        <SelectCheck title={pick.title} checked={selection.selected} shown={selecting} onToggle={selection.onToggle} className="group-hover/select:-translate-y-1" />
+      )}
+      <Link
+        to={link.to}
+        state={link.state}
+        onMouseDown={(e) => {
+          if (selection && e.shiftKey) e.preventDefault();
+        }}
+        onClick={(e) => {
+          // While anything is selected a click toggles instead of opening; shift+click selects a range.
+          if (!selection || e.metaKey || e.ctrlKey || e.altKey) return;
+          if (!selecting && !e.shiftKey) return;
+          e.preventDefault();
+          selection.onToggle(e.shiftKey);
+        }}
+        onKeyDown={(e) => {
+          if (selection && e.key === " ") {
+            e.preventDefault();
+            selection.onToggle(e.shiftKey);
+          }
+        }}
+        className="group block rounded-[var(--radius-poster)] focus-visible:outline-offset-4"
+      >
+        <div
           className={cn(
-            "transition-[filter,opacity,box-shadow] duration-300 group-hover:shadow-[0_18px_40px_-18px_rgb(0_0_0/0.7)]",
-            showState && pick.verdict === "ignored" && "opacity-55 grayscale",
+            "relative rounded-[var(--radius-poster)] ring-offset-[3px] ring-offset-background transition-[translate,box-shadow] duration-300 group-hover:-translate-y-1",
+            selection?.selected && "ring-2 ring-accent",
           )}
-        />
-        {showState && <StatePill pick={pick} />}
-      </div>
-      <div className="mt-3 flex min-w-0 flex-col gap-1.5 px-0.5">
-        <p className="text-[15px] leading-tight font-semibold">
-          <span className="line-clamp-1 decoration-text-muted/60 underline-offset-4 group-hover:underline">{pick.title}</span>
-          {pick.year && <span className="nums text-[13px] font-normal text-text-muted">{pick.year}</span>}
-        </p>
-        <RatingChips ratings={pick.ratings} />
-        {footer && <p className="text-[13px] leading-snug text-text-muted">{footer}</p>}
-      </div>
-    </Link>
+        >
+          <Poster
+            src={pick.poster_url}
+            title={pick.title}
+            className={cn(
+              "transition-[filter,opacity,box-shadow] duration-300 group-hover:shadow-[0_18px_40px_-18px_rgb(0_0_0/0.7)]",
+              showState && pick.verdict === "ignored" && "opacity-55 grayscale",
+            )}
+          />
+          {showState && <StatePill pick={pick} />}
+        </div>
+        <div className="mt-3 flex min-w-0 flex-col gap-1.5 px-0.5">
+          <p className="text-[15px] leading-tight font-semibold">
+            <span className="line-clamp-1 decoration-text-muted/60 underline-offset-4 group-hover:underline">{pick.title}</span>
+            {pick.year && <span className="nums text-[13px] font-normal text-text-muted">{pick.year}</span>}
+          </p>
+          <RatingChips ratings={pick.ratings} />
+          {footer && <p className="text-[13px] leading-snug text-text-muted">{footer}</p>}
+        </div>
+      </Link>
+    </div>
   );
 }
 

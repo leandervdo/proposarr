@@ -8,6 +8,7 @@ import { useOpenTitle, useTitleLink } from "@/lib/titleModal";
 import { cn } from "@/lib/utils";
 import { RatingChips, TitleLinks } from "./PickMeta";
 import { Poster } from "./Poster";
+import { SelectCheck, type CardSelection } from "./SelectCheck";
 import { Button } from "./ui/button";
 import { useVerdictActions } from "./useVerdictActions";
 
@@ -16,9 +17,11 @@ interface PickCardProps {
   onAccept: (pick: Pick) => void;
   /** The pick comes from an open search: every pick is free and the score comes from ratings. */
   openSearch?: boolean;
+  /** Multi-select: a checkbox on the corner, and clicks toggle while anything is selected. */
+  selection?: CardSelection;
 }
 
-export function PickCard({ pick, onAccept, openSearch = false }: PickCardProps) {
+export function PickCard({ pick, onAccept, openSearch = false, selection }: PickCardProps) {
   const [revealed, setRevealed] = useState(false);
   const { decide } = useVerdictActions();
   const openTitle = useOpenTitle();
@@ -29,6 +32,7 @@ export function PickCard({ pick, onAccept, openSearch = false }: PickCardProps) 
   const added = pick.request?.status === "added";
   const target = { kind: pick.kind, tmdbId: pick.tmdb_id, pickId: pick.id };
   const link = titleLink(target);
+  const selecting = selection?.active ?? false;
 
   const open = () => {
     setRevealed(false);
@@ -57,10 +61,27 @@ export function PickCard({ pick, onAccept, openSearch = false }: PickCardProps) 
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLElement>) => {
-    if (e.key === "Enter" && e.target === e.currentTarget) {
+    if (e.target !== e.currentTarget) return;
+    if (e.key === "Enter") {
       e.preventDefault();
       open();
+    } else if (e.key === " " && selection) {
+      e.preventDefault();
+      selection.onToggle(e.shiftKey);
     }
+  };
+
+  // While anything is selected a click anywhere on the card toggles it, and shift+click selects a range.
+  // Ctrl/Cmd+click keeps opening the title link in a new tab.
+  const onClickCapture = (e: MouseEvent<HTMLElement>) => {
+    if (!selection || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (!selecting && !e.shiftKey) return;
+    const target = e.target as HTMLElement;
+    if (target.closest("[role='checkbox']")) return;
+    if (!selecting && target.closest("button, a[target='_blank']")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    selection.onToggle(e.shiftKey);
   };
 
   return (
@@ -68,11 +89,20 @@ export function PickCard({ pick, onAccept, openSearch = false }: PickCardProps) 
       ref={cardRef}
       tabIndex={0}
       onKeyDown={onKeyDown}
-      aria-label={`${pick.title}${pick.year ? ` (${pick.year})` : ""}, score ${pick.score}. Press Enter for details.`}
-      className="group/card relative flex flex-col rounded-[var(--radius-poster)] focus-visible:outline-offset-4"
+      onClickCapture={onClickCapture}
+      onMouseDown={(e) => {
+        // Shift+click selects a range; without this it also selects the text in between.
+        if (selection && e.shiftKey) e.preventDefault();
+      }}
+      aria-label={`${selection?.selected ? "Selected: " : ""}${pick.title}${pick.year ? ` (${pick.year})` : ""}, score ${pick.score}. Press Enter for details${selection ? ", Space to select" : ""}.`}
+      className="group/card group/select relative flex flex-col rounded-[var(--radius-poster)] focus-visible:outline-offset-4"
     >
+      {selection && <SelectCheck title={pick.title} checked={selection.selected} shown={selecting} onToggle={selection.onToggle} />}
       <div
-        className="relative cursor-pointer"
+        className={cn(
+          "relative cursor-pointer rounded-[var(--radius-poster)] ring-offset-[3px] ring-offset-background transition-shadow duration-150",
+          selection?.selected && "ring-2 ring-accent",
+        )}
         onPointerDown={(e) => {
           pointerType.current = e.pointerType;
         }}
@@ -98,14 +128,20 @@ export function PickCard({ pick, onAccept, openSearch = false }: PickCardProps) 
         )}
 
         {/* State strip, always visible */}
-        {(added || pick.verdict) && !revealed && (
-          <div className="scrim-bottom absolute inset-x-0 bottom-0 flex items-end rounded-b-[var(--radius-poster)] px-3 pt-10 pb-2.5 text-[13px] text-white transition-opacity group-focus-within/card:opacity-0 group-hover/card:opacity-0">
+        {(added || pick.verdict) && (!revealed || selecting) && (
+          <div
+            className={cn(
+              "scrim-bottom absolute inset-x-0 bottom-0 flex items-end rounded-b-[var(--radius-poster)] px-3 pt-10 pb-2.5 text-[13px] text-white transition-opacity",
+              !selecting && "group-focus-within/card:opacity-0 group-hover/card:opacity-0",
+            )}
+          >
             <VerdictLine pick={pick} app={app} />
           </div>
         )}
 
-        {/* Details and actions: hover or focus on desktop, tap on touch */}
+        {/* Details and actions: hover or focus on desktop, tap on touch. Hidden while selecting. */}
         <div
+          hidden={selecting}
           className={cn(
             // pt-14 keeps the overview clear of the score badge, which stays on top.
             "absolute inset-0 flex flex-col justify-end rounded-[var(--radius-poster)] bg-[rgb(var(--scrim)/0.88)] p-3 pt-14 text-white opacity-0 backdrop-blur-[2px] transition-opacity duration-200",

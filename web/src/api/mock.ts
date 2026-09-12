@@ -815,7 +815,7 @@ function titleDetails(kind: Kind, tmdbId: number): TitleDetails {
 
 export async function mockFetch(method: string, path: string, body?: unknown): Promise<{ data: unknown; headers: Headers }> {
   const headers = new Headers();
-  const data = await route(method, path, body, headers);
+  const data = (await mockBulkAddRoute(method, path, body)) ?? (await route(method, path, body, headers));
   return { data, headers };
 }
 
@@ -1012,3 +1012,63 @@ async function route(method: string, path: string, body: unknown, headers: Heade
   }
   throw new ApiError(404, `mock: no route for ${method} ${path}`);
 }
+
+// ---------- bulk add (multi-select) ----------
+// Varied outcomes for adding several titles at once, so the bulk add dialog shows every kind of row: grabbed,
+// waiting with alternatives, not released yet and already in the library. mockFetch asks mockBulkAddRoute
+// first; it only answers POST /api/picks/{id}/request for the movies listed here, and everything else goes
+// through route() as before.
+
+/** Nothing fits the chosen profile; with "switch" Proposarr moves to the first alternative, which grabs. */
+const MOCK_NOTHING_FITS = new Set([300668 /* Annihilation */, 8195 /* Ronin */]);
+/**
+ * Nothing fits and Radarr waits with alternatives. A mock shortcut: this happens even with "switch", so the
+ * per-row switch control shows whatever was chosen.
+ */
+const MOCK_WAITING = new Set([545611 /* Everything Everywhere All at Once */, 100 /* Lock, Stock and Two Smoking Barrels */, 661374 /* Glass Onion */]);
+/** Not released yet under Radarr's minimum availability. */
+const MOCK_UNRELEASED = new Set([17431 /* Moon */, 2322 /* Sneakers */, 5279 /* Gosford Park */]);
+/** Already in Radarr: adding answers 409, like The Prestige. */
+const MOCK_IN_LIBRARY = new Set([913 /* The Thomas Crown Affair */]);
+
+const MOCK_BULK_TITLES = [MOCK_NOTHING_FITS, MOCK_WAITING, MOCK_UNRELEASED, MOCK_IN_LIBRARY];
+
+/** POST /api/picks/{id}/request for the movies above; undefined for every other request. */
+async function mockBulkAddRoute(method: string, path: string, body: unknown): Promise<unknown> {
+  const m = /^\/api\/picks\/(\d+)\/request$/.exec(new URL(path, "http://mock").pathname);
+  if (method !== "POST" || !m) return undefined;
+  const pick = picks.find((p) => p.id === Number(m[1]));
+  if (!pick || pick.kind !== "movies" || !MOCK_BULK_TITLES.some((titles) => titles.has(pick.tmdb_id))) return undefined;
+
+  // A slightly different time per title, so the rows of a bulk add settle one by one.
+  await wait(1150 + ((pick.id * 13) % 4) * 250);
+  if (scenario === "down") throw new ApiError(0, "Proposarr is not reachable. Check that `proposarr serve` is running.");
+  const { quality_profile_id, root_folder, if_nothing_fits = "wait" } = body as { quality_profile_id?: number; root_folder?: string; if_nothing_fits?: string };
+  if (if_nothing_fits !== "switch" && if_nothing_fits !== "wait") {
+    throw new ApiError(400, `if_nothing_fits must be "switch" or "wait", not "${if_nothing_fits}"`);
+  }
+  const profile = options.radarr.quality_profiles.find((p) => p.id === quality_profile_id);
+  if (!profile) throw new ApiError(400, "quality_profile_id is required: choose a quality profile for this title");
+  if (MOCK_IN_LIBRARY.has(pick.tmdb_id)) throw new ApiError(409, `${pick.title} (${pick.year}) is already in your Radarr library`);
+
+  setVerdictFor(pick, "accepted");
+  pick.request = {
+    pick_id: pick.id, app: "radarr", target_id: 900 + pick.id, quality_profile: profile.name,
+    root_folder: root_folder ?? options.radarr.root_folders[0]!.path, status: "added", requested_at: new Date().toISOString(),
+    release: checking(profile.name),
+  };
+  setTimeout(() => finishCheck(pick, () => mockBulkOutcome(pick, profile.name, if_nothing_fits)), ((pick.id * 7) % 4) * 700);
+  emit({ type: "pick.updated", data: { ...pick } });
+  return { ...pick };
+}
+
+function mockBulkOutcome(pick: Pick, profile: string, ifNothingFits: IfNothingFits): ReleaseCheck {
+  if (MOCK_UNRELEASED.has(pick.tmdb_id)) return { status: "unavailable", profile, found: 0, qualities: [], alternatives: [] };
+  // Borrow the releases and alternatives of a search that found nothing fitting, for the chosen profile.
+  const waiting = releaseCheck(pick, "Remux + WEB 2160p", "wait");
+  const alternatives = waiting.alternatives.filter((a) => a.name !== profile);
+  const first = alternatives[0];
+  if (MOCK_WAITING.has(pick.tmdb_id) || ifNothingFits !== "switch" || !first) return { ...waiting, profile, alternatives };
+  return { ...releaseCheck(pick, first.name, "wait"), switched_from: profile };
+}
+// ---------- end of bulk add (multi-select) ----------

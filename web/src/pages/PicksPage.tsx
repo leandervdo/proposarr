@@ -10,12 +10,14 @@ import type { Kind, Pick, Run, VerdictFilter } from "@/api/types";
 import { AcceptDialog } from "@/components/AcceptDialog";
 import { EmptyState, ErrorNote } from "@/components/EmptyState";
 import { PickCard } from "@/components/PickCard";
+import { SelectionBar } from "@/components/SelectionBar";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/segmented";
 import { Select, SelectItem } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { appFor, appName, duration, isOpenSearch, relativeTime } from "@/lib/format";
 import { byRating } from "@/lib/ratings";
+import { useSelection } from "@/lib/useSelection";
 import { useTick } from "@/lib/useTick";
 import { cn } from "@/lib/utils";
 
@@ -127,6 +129,8 @@ export function PicksPage() {
   const filtered = all.filter((p) => matchesVerdict(p, verdict) && p.score >= Number(minScore));
   // Open-search results are ranked by real ratings, as the server does; everything else keeps the API order.
   const visible = shownSearch ? [...filtered].sort(byRating) : filtered;
+  // Starts empty again for another kind, run or filter.
+  const selection = useSelection(visible, `${kind}:${runParam}:${verdict}:${minScore}`);
 
   if (status.data?.setup_required) return <Navigate to="/setup" replace />;
 
@@ -254,7 +258,12 @@ export function PicksPage() {
                     animate={{ opacity: 1, y: 0, transition: { delay: Math.min(i, 12) * 0.025, duration: 0.3 } }}
                     exit={{ opacity: 0, scale: 0.94, transition: { duration: 0.18 } }}
                   >
-                    <PickCard pick={p} onAccept={setAccepting} openSearch={isOpenSearch(runsById.get(p.run_id)) || p.run_use_taste === false} />
+                    <PickCard
+                      pick={p}
+                      onAccept={setAccepting}
+                      openSearch={isOpenSearch(runsById.get(p.run_id)) || p.run_use_taste === false}
+                      selection={{ selected: selection.isSelected(p.id), active: selection.active, onToggle: (range) => selection.toggle(p.id, range) }}
+                    />
                   </motion.li>
                 ))}
               </AnimatePresence>
@@ -263,6 +272,7 @@ export function PicksPage() {
         </>
       )}
 
+      <SelectionBar selection={selection} kind={kind} />
       <AcceptDialog pick={accepting} onClose={() => setAccepting(null)} />
     </>
   );
