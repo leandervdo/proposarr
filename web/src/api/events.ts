@@ -1,12 +1,13 @@
-import type { Pick, ProgressEvent, Run } from "./types";
+import type { OwnedTitle, Pick, ProgressEvent, Run } from "./types";
 
 export type LiveEvent =
   | { type: "run.started"; data: Run }
   | { type: "run.progress"; data: ProgressEvent }
   | { type: "run.finished"; data: Run }
-  | { type: "pick.updated"; data: Pick };
+  | { type: "pick.updated"; data: Pick }
+  | { type: "owned.updated"; data: OwnedTitle };
 
-const EVENT_TYPES = ["run.started", "run.progress", "run.finished", "pick.updated"] as const;
+const EVENT_TYPES = ["run.started", "run.progress", "run.finished", "pick.updated", "owned.updated"] as const;
 
 /** Subscribes to /api/events. Returns an unsubscribe function. */
 export function subscribe(onEvent: (e: LiveEvent) => void, onConnection: (connected: boolean) => void): () => void {

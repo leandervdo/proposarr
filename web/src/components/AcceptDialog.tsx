@@ -1,5 +1,5 @@
 import { AlertCircle, Clock, HardDrive, Loader2 } from "lucide-react";
-import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { toast } from "sonner";
 import { ApiError } from "@/api/client";
@@ -8,6 +8,7 @@ import type { IfNothingFits, Pick, ReleaseCheck } from "@/api/types";
 import { fallbackTargets } from "@/lib/fallback";
 import { appFor, appName, fileSize, gigabytes } from "@/lib/format";
 import { announceRelease, awaitRelease, isAwaitingRelease, takeAwaitedRelease, useReleaseShown } from "@/lib/releases";
+import { useMounted } from "@/lib/useMounted";
 import { TitleLinks } from "./PickMeta";
 import { Poster } from "./Poster";
 import { Button } from "./ui/button";
@@ -426,16 +427,4 @@ function InlineError({ message }: { message: string }) {
       <span className="break-words">{message}</span>
     </p>
   );
-}
-
-/** False once the dialog has closed or moved to another title. */
-function useMounted() {
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
-  return mounted;
 }

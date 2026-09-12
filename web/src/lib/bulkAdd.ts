@@ -105,13 +105,13 @@ const SUMMARY: [RowOutcome, string][] = [
   ["error", "failed"],
 ];
 
-/** "5 added · 3 grabbed · 1 waiting · 1 failed" */
-export function bulkSummary(outcomes: readonly RowOutcome[]): string {
+/** "5 added · 3 grabbed · 1 waiting · 1 failed". `words` renames parts, e.g. "started" for searches instead of "added". */
+export function bulkSummary(outcomes: readonly RowOutcome[], words: Partial<Record<RowOutcome, string>> = {}): string {
   const added = outcomes.filter((o) => o !== "queued" && o !== "adding" && o !== "exists" && o !== "error").length;
-  const parts = added > 0 ? [`${added} added`] : [];
+  const parts = added > 0 ? [`${added} ${words.added ?? "added"}`] : [];
   for (const [outcome, label] of SUMMARY) {
     const n = outcomes.filter((o) => o === outcome).length;
-    if (n > 0) parts.push(`${n} ${label}`);
+    if (n > 0) parts.push(`${n} ${words[outcome] ?? label}`);
   }
   return parts.join(" · ");
 }

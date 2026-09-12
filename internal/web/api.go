@@ -709,6 +709,9 @@ func normalizeRun(r store.Run) store.Run {
 	if r.Rejected == nil {
 		r.Rejected = []pipeline.Rejected{}
 	}
+	if r.Owned == nil {
+		r.Owned = []pipeline.OwnedMatch{}
+	}
 	return r
 }
 

@@ -8,7 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { ApiError, api, type PicksPage, type PicksQuery } from "./client";
-import type { App, IfNothingFits, Kind, Library, LibraryTitle, Pick, Service, SettingValues, Verdict } from "./types";
+import type { App, IfNothingFits, Kind, Library, LibraryTitle, OwnedTitle, Pick, Service, SettingValues, Verdict } from "./types";
 
 export const keys = {
   status: ["status"] as const,
@@ -22,6 +22,7 @@ export const keys = {
   library: (kind: Kind) => ["library", kind] as const,
   options: (app: App) => ["options", app] as const,
   title: (kind: Kind, tmdbId: number) => ["title", kind, tmdbId] as const,
+  owned: (runId: number) => ["owned", runId] as const,
 };
 
 /** What can sit under the "picks" key: a plain list or paged lists. */
@@ -186,15 +187,15 @@ export function useCachedPicks(ids: readonly number[]): (Pick | undefined)[] {
   const qc = useQueryClient();
   const idsKey = ids.join(",");
   const subscribe = useCallback((onChange: () => void) => qc.getQueryCache().subscribe(onChange), [qc]);
-  const snapshot = useMemo(() => cachedPicksGetter(qc, idsKey ? idsKey.split(",").map(Number) : []), [qc, idsKey]);
+  const snapshot = useMemo(() => cachedGetter(idsKey ? idsKey.split(",").map(Number) : [], (id) => findCachedPick(qc, id)), [qc, idsKey]);
   return useSyncExternalStore(subscribe, snapshot);
 }
 
-/** Reads the cached picks for `ids`, returning the same array while none of them changed (useSyncExternalStore needs that). */
-function cachedPicksGetter(qc: QueryClient, ids: readonly number[]): () => (Pick | undefined)[] {
-  let last: (Pick | undefined)[] = [];
+/** Reads the cached entries for `ids`, returning the same array while none of them changed (useSyncExternalStore needs that). */
+function cachedGetter<T>(ids: readonly number[], find: (id: number) => T | undefined): () => (T | undefined)[] {
+  let last: (T | undefined)[] = [];
   return () => {
-    const next = ids.map((id) => findCachedPick(qc, id));
+    const next = ids.map(find);
     if (next.length === last.length && next.every((p, i) => p === last[i])) return last;
     last = next;
     return next;
@@ -215,4 +216,57 @@ export function useSwitchProfile() {
     mutationFn: ({ pick, qualityProfileId }: { pick: Pick; qualityProfileId: number }) => api.switchProfile(pick.id, qualityProfileId),
     onSuccess: (updated) => applyPick(qc, updated),
   });
+}
+
+/** An open search's owned matches with their live state. Only open searches with matches have any to fetch. */
+export const useOwned = (runId: number | undefined, enabled: boolean) =>
+  useQuery({
+    queryKey: keys.owned(runId ?? 0),
+    queryFn: async () => (await api.owned(runId!)) ?? [],
+    enabled: enabled && runId !== undefined,
+    // Downloads move on without events; searches arrive through owned.updated.
+    refetchInterval: (query) => (query.state.data?.some((t) => t.status === "downloading") ? 30_000 : false),
+  });
+
+const sameOwned = (a: OwnedTitle, b: OwnedTitle) => a.tmdb_id === b.tmdb_id && a.kind === b.kind;
+
+/** Replaces an owned title in every cached owned list. */
+export function applyOwned(qc: QueryClient, title: OwnedTitle) {
+  qc.setQueriesData<OwnedTitle[]>({ queryKey: ["owned"] }, (old) =>
+    old?.some((t) => sameOwned(t, title)) ? old.map((t) => (sameOwned(t, title) ? title : t)) : old,
+  );
+}
+
+/** Starts Radarr's search for a movie in the library that isn't on disk; the check then follows through owned.updated. */
+export function useSearchOwnedMovie() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ tmdbId, qualityProfileId, ifNothingFits }: { tmdbId: number; qualityProfileId: number; ifNothingFits?: IfNothingFits }) =>
+      api.searchOwnedMovie(tmdbId, qualityProfileId, ifNothingFits),
+    onSuccess: (updated) => applyOwned(qc, updated),
+    // On disk or already searching (409), or gone from Radarr (404): the cached state is out of date.
+    onError: (err) => {
+      if (err instanceof ApiError && (err.status === 409 || err.status === 404)) void qc.invalidateQueries({ queryKey: ["owned"] });
+    },
+  });
+}
+
+function findCachedOwned(qc: QueryClient, kind: Kind, tmdbId: number): OwnedTitle | undefined {
+  for (const [, data] of qc.getQueriesData<OwnedTitle[]>({ queryKey: ["owned"] })) {
+    const found = data?.find((t) => t.kind === kind && t.tmdb_id === tmdbId);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** Owned movies by TMDB id, kept live from the cached owned lists like useCachedPicks (the get dialog). */
+export function useCachedOwnedMovies(tmdbIds: readonly number[]): (OwnedTitle | undefined)[] {
+  const qc = useQueryClient();
+  const idsKey = tmdbIds.join(",");
+  const subscribe = useCallback((onChange: () => void) => qc.getQueryCache().subscribe(onChange), [qc]);
+  const snapshot = useMemo(
+    () => cachedGetter(idsKey ? idsKey.split(",").map(Number) : [], (id) => findCachedOwned(qc, "movies", id)),
+    [qc, idsKey],
+  );
+  return useSyncExternalStore(subscribe, snapshot);
 }

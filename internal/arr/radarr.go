@@ -3,6 +3,7 @@ package arr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -171,20 +172,11 @@ func (r *Radarr) Lookup(ctx context.Context, tmdbID int) (*Lookup, error) {
 
 // libraryID is the Radarr id of the library movie with a TMDB id, 0 when there is none.
 func (r *Radarr) libraryID(ctx context.Context, tmdbID int) (int, error) {
-	var ms []struct {
-		ID     int `json:"id"`
-		TMDBID int `json:"tmdbId"`
+	m, err := r.MovieByTMDB(ctx, tmdbID)
+	if errors.Is(err, ErrNotFound) {
+		return 0, nil
 	}
-	if err := r.c.get(ctx, "/api/v3/movie", url.Values{"tmdbId": {strconv.Itoa(tmdbID)}}, &ms); err != nil {
-		return 0, err
-	}
-	// Match the id, in case a Radarr ignores the filter and lists every movie.
-	for _, m := range ms {
-		if m.TMDBID == tmdbID {
-			return m.ID, nil
-		}
-	}
-	return 0, nil
+	return m.ID, err
 }
 
 // percent rounds a 0-100 rating; anything outside that range is unknown.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/leandervdo/proposarr/internal/media"
 	"github.com/leandervdo/proposarr/internal/pipeline"
@@ -94,6 +95,100 @@ func TestRequestRelease(t *testing.T) {
 	}
 }
 
+func TestRunOwned(t *testing.T) {
+	s, _ := openTest(t)
+	id, err := s.CreateRun(ctx, Run{Kind: media.Movies, Vibe: "fast and the furious movies"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, _, err := s.GetRun(ctx, id); err != nil || r.Owned == nil || len(r.Owned) != 0 {
+		t.Fatalf("running run owned = %+v, %v", r.Owned, err)
+	}
+	owned := []pipeline.OwnedMatch{{TMDBID: 9799, Title: "The Fast and the Furious", Year: 2001}, {TMDBID: 584, Title: "2 Fast 2 Furious"}}
+	if err := s.FinishRun(ctx, id, &pipeline.Run{Kind: media.Movies, OpenSearch: true, Owned: owned}, nil); err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := s.GetRun(ctx, id)
+	if err != nil || fmt.Sprint(r.Owned) != fmt.Sprint(owned) {
+		t.Errorf("owned = %+v, %v", r.Owned, err)
+	}
+	runs, err := s.ListRuns(ctx, 1)
+	if err != nil || len(runs) != 1 || fmt.Sprint(runs[0].Owned) != fmt.Sprint(owned) {
+		t.Errorf("listed runs = %+v, %v", runs, err)
+	}
+	taste := finishedRun(t, s, media.Movies)
+	if r, _, err := s.GetRun(ctx, taste); err != nil || r.Owned == nil || len(r.Owned) != 0 {
+		t.Errorf("taste run owned = %+v, %v", r.Owned, err)
+	}
+}
+
+func TestLibrarySearches(t *testing.T) {
+	s, path := openTest(t)
+	if got, err := s.LibrarySearches(ctx, media.Movies, nil); err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("searches for no ids = %v, %v", got, err)
+	}
+	at := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	checking := json.RawMessage(`{"status":"checking","profile":"Remux + WEB 2160p"}`)
+	if err := s.RecordLibrarySearch(ctx, LibrarySearch{Kind: media.Movies, TMDBID: 9693, TargetID: 250, QualityProfile: "Remux + WEB 2160p", RequestedAt: at, Release: checking}); err != nil {
+		t.Fatal(err)
+	}
+	// The same id for the other kind is another title.
+	if err := s.RecordLibrarySearch(ctx, LibrarySearch{Kind: media.Series, TMDBID: 9693, QualityProfile: "HD-1080p"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.LibrarySearches(ctx, media.Movies, []int{9693, 603})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("searches = %+v, %v", got, err)
+	}
+	if ls := got[9693]; ls.Kind != media.Movies || ls.TMDBID != 9693 || ls.TargetID != 250 || ls.QualityProfile != "Remux + WEB 2160p" || !ls.RequestedAt.Equal(at) || string(ls.Release) != string(checking) {
+		t.Errorf("search = %+v", ls)
+	}
+
+	grabbed := json.RawMessage(`{"status":"grabbed","profile":"Remux + WEB 1080p","switched_from":"Remux + WEB 2160p"}`)
+	if err := s.UpdateLibrarySearch(ctx, media.Movies, 9693, "Remux + WEB 1080p", grabbed); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.LibrarySearches(ctx, media.Movies, []int{9693})
+	if ls := got[9693]; ls.QualityProfile != "Remux + WEB 1080p" || string(ls.Release) != string(grabbed) || !ls.RequestedAt.Equal(at) {
+		t.Errorf("updated search = %+v", ls)
+	}
+	if series, _ := s.LibrarySearches(ctx, media.Series, []int{9693}); series[9693].QualityProfile != "HD-1080p" || series[9693].Release != nil {
+		t.Errorf("series search = %+v", series[9693])
+	}
+	if err := s.UpdateLibrarySearch(ctx, media.Movies, 603, "HD-1080p", grabbed); !errors.Is(err, ErrNotFound) {
+		t.Errorf("update without a search: %v", err)
+	}
+
+	// A new search replaces the previous one.
+	later := at.Add(time.Hour)
+	if err := s.RecordLibrarySearch(ctx, LibrarySearch{Kind: media.Movies, TMDBID: 9693, TargetID: 250, QualityProfile: "HD Bluray + WEB", RequestedAt: later, Release: checking}); err != nil {
+		t.Fatal(err)
+	}
+	var rows int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM library_searches WHERE kind = 'movies'`).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("rows = %d, %v", rows, err)
+	}
+	got, _ = s.LibrarySearches(ctx, media.Movies, []int{9693})
+	if ls := got[9693]; ls.QualityProfile != "HD Bluray + WEB" || !ls.RequestedAt.Equal(later) || string(ls.Release) != string(checking) {
+		t.Errorf("replaced search = %+v", ls)
+	}
+
+	// A check the stopped server was still following is reported as searching.
+	s.Close()
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	got, err = s2.LibrarySearches(ctx, media.Movies, []int{9693})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, profile := releaseStatus(t, got[9693].Release); status != "searching" || profile != "Remux + WEB 2160p" {
+		t.Errorf("after restart: status %q, profile %q", status, profile)
+	}
+}
+
 func TestMigrateFromV3(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "proposarr.db")
 	db, err := sql.Open("sqlite", path)
@@ -123,8 +218,11 @@ func TestMigrateFromV3(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != 4 {
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != len(migrations) {
 		t.Fatalf("version = %d, %v", version, err)
+	}
+	if r, _, err := s.GetRun(ctx, 1); err != nil || r.Owned == nil || len(r.Owned) != 0 {
+		t.Fatalf("a run stored before owned matches = %+v, %v", r.Owned, err)
 	}
 	p, err := s.GetPick(ctx, 1)
 	if err != nil || p.Request == nil || p.Request.TargetID != 250 || p.Request.Release != nil {

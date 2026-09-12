@@ -94,7 +94,9 @@ func TestRadarrMovieAndProfile(t *testing.T) {
 			editor = decodeBody(t, r)
 			w.WriteHeader(http.StatusAccepted)
 		},
-		"GET /api/v3/movie/250": jsonBody(`{"id":250,"tmdbId":9693,"title":"Children of Men","year":2006,"qualityProfileId":7,"isAvailable":true,"originalLanguage":{"id":1,"name":"English"}}`),
+		"GET /api/v3/movie/250": jsonBody(`{"id":250,"tmdbId":9693,"title":"Children of Men","year":2006,"qualityProfileId":7,"isAvailable":true,"originalLanguage":{"id":1,"name":"English"},
+			"monitored":true,"hasFile":true,"sizeOnDisk":32390607569,"movieFile":{"id":12,"size":32390607569,"quality":{"quality":{"id":30,"name":"Remux-1080p"},"revision":{"version":1}}}}`),
+		"GET /api/v3/movie/251": jsonBody(`{"id":251,"tmdbId":27205,"title":"Inception","year":2010,"qualityProfileId":8,"isAvailable":false,"monitored":false,"hasFile":false,"sizeOnDisk":0}`),
 	})
 	r := NewRadarr(srv.URL, key, nil)
 	ctx := context.Background()
@@ -102,12 +104,87 @@ func TestRadarrMovieAndProfile(t *testing.T) {
 	if err := r.SetQualityProfile(ctx, 250, 8); err != nil || editor["qualityProfileId"] != float64(8) || !slices.Equal(editor["movieIds"].([]any), []any{float64(250)}) {
 		t.Errorf("set profile = %v, body %v", err, editor)
 	}
+	if err := r.SetMonitored(ctx, 251, true); err != nil || editor["monitored"] != true || editor["qualityProfileId"] != nil || !slices.Equal(editor["movieIds"].([]any), []any{float64(251)}) {
+		t.Errorf("set monitored = %v, body %v", err, editor)
+	}
 	m, err := r.Movie(ctx, 250)
-	if err != nil || m != (Movie{ID: 250, TMDBID: 9693, Title: "Children of Men", Year: 2006, QualityProfileID: 7, OriginalLanguage: 1, Available: true}) {
+	if err != nil || m != (Movie{ID: 250, TMDBID: 9693, Title: "Children of Men", Year: 2006, QualityProfileID: 7, OriginalLanguage: 1, Available: true,
+		Monitored: true, HasFile: true, SizeOnDisk: 32_390_607_569, FileQuality: "Remux-1080p"}) {
 		t.Errorf("movie = %+v, %v", m, err)
+	}
+	m, err = r.Movie(ctx, 251)
+	if err != nil || m != (Movie{ID: 251, TMDBID: 27205, Title: "Inception", Year: 2010, QualityProfileID: 8}) {
+		t.Errorf("movie without a file = %+v, %v", m, err)
 	}
 	if _, err := r.Movie(ctx, 1); !errors.Is(err, ErrNotFound) {
 		t.Errorf("missing movie err = %v", err)
+	}
+}
+
+func TestRadarrMovieByTMDB(t *testing.T) {
+	// A Radarr that ignores the filter lists every movie.
+	srv, _ := server(t, map[string]http.HandlerFunc{
+		"GET /api/v3/movie": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("tmdbId") == "" {
+				t.Errorf("query = %s", r.URL.RawQuery)
+			}
+			io.WriteString(w, `[
+				{"id":1,"tmdbId":603,"title":"The Matrix","year":1999,"monitored":true,"hasFile":true},
+				{"id":250,"tmdbId":9693,"title":"Children of Men","year":2006,"qualityProfileId":7,"monitored":false,"hasFile":false,"isAvailable":true}
+			]`)
+		},
+	})
+	r := NewRadarr(srv.URL, key, nil)
+	ctx := context.Background()
+
+	m, err := r.MovieByTMDB(ctx, 9693)
+	if err != nil || m != (Movie{ID: 250, TMDBID: 9693, Title: "Children of Men", Year: 2006, QualityProfileID: 7, Available: true}) {
+		t.Errorf("movie = %+v, %v", m, err)
+	}
+	if _, err := r.MovieByTMDB(ctx, 27205); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing movie err = %v", err)
+	}
+	if id, err := r.libraryID(ctx, 27205); id != 0 || err != nil {
+		t.Errorf("libraryID of a missing movie = %d, %v", id, err)
+	}
+}
+
+func TestRadarrQueue(t *testing.T) {
+	srv, _ := server(t, map[string]http.HandlerFunc{
+		"GET /api/v3/queue": func(w http.ResponseWriter, r *http.Request) {
+			if q := r.URL.Query(); q.Get("movieIds") != "250" {
+				t.Errorf("query = %s", r.URL.RawQuery)
+			}
+			io.WriteString(w, `{"page":1,"totalRecords":3,"records":[
+				{"movieId":250,"status":"downloading","title":"Children of Men 2006 BluRay 1080p REMUX-FraMeSToR","size":32000000000.0,"sizeleft":8000000000.0,
+				 "indexer":"TorrentLeech","protocol":"torrent","quality":{"quality":{"id":30,"name":"Remux-1080p"}}},
+				{"movieId":250,"status":"queued","title":"Unknown size","quality":{"quality":{"name":"WEBDL-1080p"}}},
+				{"movieId":251,"status":"downloading","title":"Another movie","size":100,"sizeleft":0}
+			]}`)
+		},
+	})
+	items, err := NewRadarr(srv.URL, key, nil).Queue(context.Background(), 250)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("queue = %+v, %v", items, err)
+	}
+	want := QueueItem{Status: "downloading", Title: "Children of Men 2006 BluRay 1080p REMUX-FraMeSToR", Quality: "Remux-1080p",
+		Size: 32_000_000_000, SizeLeft: 8_000_000_000, Indexer: "TorrentLeech", Protocol: "torrent"}
+	if items[0] != want {
+		t.Errorf("item = %+v, want %+v", items[0], want)
+	}
+	if p, ok := items[0].Progress(); !ok || p != 75 {
+		t.Errorf("progress = %v, %v", p, ok)
+	}
+	if p, ok := items[1].Progress(); ok || p != 0 {
+		t.Errorf("progress without a size = %v, %v", p, ok)
+	}
+	for _, tc := range []struct {
+		size, left int64
+		want       float64
+	}{{3, 2, 33.3}, {100, 0, 100}, {100, 150, 0}, {100, -5, 100}} {
+		if p, _ := (QueueItem{Size: tc.size, SizeLeft: tc.left}).Progress(); p != tc.want {
+			t.Errorf("progress(%d, %d) = %v, want %v", tc.size, tc.left, p, tc.want)
+		}
 	}
 }
 

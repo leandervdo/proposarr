@@ -35,18 +35,80 @@ type rawPick struct {
 	Source    string   `json:"source"`
 }
 
-func decodePicks(res agent.Result) ([]rawPick, error) {
+// rawOwned is a library title the agent says matches an open search.
+type rawOwned struct {
+	Title string `json:"title"`
+	Year  int    `json:"year"`
+}
+
+// decodePicks reads the agent's picks, and for an open search its owned matches.
+func decodePicks(res agent.Result) ([]rawPick, []rawOwned, error) {
 	b, err := agent.StructuredJSON(res)
 	if err != nil {
-		return nil, fmt.Errorf("agent output: %w", err)
+		return nil, nil, fmt.Errorf("agent output: %w", err)
 	}
 	var out struct {
-		Picks []rawPick `json:"picks"`
+		Picks []rawPick  `json:"picks"`
+		Owned []rawOwned `json:"owned"`
 	}
 	if err := json.Unmarshal(b, &out); err != nil {
-		return nil, fmt.Errorf("agent output: %w", err)
+		return nil, nil, fmt.Errorf("agent output: %w", err)
 	}
-	return out.Picks, nil
+	return out.Picks, out.Owned, nil
+}
+
+// reasonExcluded rejects a pick that is in the library or watch history.
+const reasonExcluded = "already in library or watch history"
+
+// ownedMatches resolves the owned titles the agent named against the library,
+// by normalised title and a year within one (an unknown year matches any);
+// entries without a library match are dropped. The picks rejected because they
+// are in the library follow, since the prompt lists only some owned titles.
+// Duplicates are removed and the result is capped at maxOwned.
+func ownedMatches(named []rawOwned, lib []media.Title, rejected []Rejected) []OwnedMatch {
+	byTitle := map[string][]media.Title{}
+	byID := map[int]media.Title{}
+	for _, t := range lib {
+		if t.TMDBID <= 0 {
+			continue
+		}
+		if _, ok := byID[t.TMDBID]; !ok {
+			byID[t.TMDBID] = t
+		}
+		if n := media.NormTitle(t.Title); n != "" {
+			byTitle[n] = append(byTitle[n], t)
+		}
+	}
+	out := []OwnedMatch{}
+	seen := map[int]bool{}
+	add := func(t media.Title) {
+		if !seen[t.TMDBID] && len(out) < maxOwned {
+			seen[t.TMDBID] = true
+			out = append(out, OwnedMatch{TMDBID: t.TMDBID, Title: t.Title, Year: t.Year})
+		}
+	}
+	for _, o := range named {
+		// Among titles that share a name, the exact year wins.
+		same := byTitle[media.NormTitle(o.Title)]
+		best := -1
+		for i, t := range same {
+			if o.Year != 0 && t.Year != 0 && !yearClose(t.Year, o.Year) {
+				continue
+			}
+			if best < 0 || (t.Year == o.Year && same[best].Year != o.Year) {
+				best = i
+			}
+		}
+		if best >= 0 {
+			add(same[best])
+		}
+	}
+	for _, r := range rejected {
+		if t, ok := byID[r.TMDBID]; ok && r.Reason == reasonExcluded {
+			add(t)
+		}
+	}
+	return out
 }
 
 type keptPick struct {
@@ -101,7 +163,7 @@ func (p *Pipeline) verify(ctx context.Context, req Request, run *Run, raw []rawP
 			reject(k.pick.TMDBID, k.pick.Title, "duplicate")
 			continue
 		case excluded[k.pick.TMDBID] || matchesUntracked(untracked, k.pick.Title, k.pick.Year):
-			reject(k.pick.TMDBID, k.pick.Title, "already in library or watch history")
+			reject(k.pick.TMDBID, k.pick.Title, reasonExcluded)
 			continue
 		case !req.OpenSearch && len(kept) >= req.Picks:
 			reject(k.pick.TMDBID, k.pick.Title, "over pick count")

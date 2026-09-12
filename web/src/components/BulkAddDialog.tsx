@@ -1,12 +1,12 @@
 import * as SelectPrimitive from "@radix-ui/react-select";
 import { useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, CalendarClock, Check, CircleAlert, Clock, HardDrive, Info, Loader2, Search } from "lucide-react";
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { toast } from "sonner";
 import { ApiError } from "@/api/client";
 import { useAppOptions, useCachedPicks, useConfig, useRequestPick, useSwitchProfile } from "@/api/queries";
-import type { AppOptions, IfNothingFits, Kind, Pick, ReleaseCheck } from "@/api/types";
+import type { AppOptions, IfNothingFits, Kind, Pick, ProfileOption, ReleaseCheck } from "@/api/types";
 import {
   bulkSummary,
   effectiveFallback,
@@ -22,6 +22,7 @@ import {
 import { mapLimit } from "@/lib/concurrency";
 import { appFor, appName, fileSize, gigabytes, plural } from "@/lib/format";
 import { awaitRelease, takeAwaitedRelease, useReleaseShown } from "@/lib/releases";
+import { useMounted } from "@/lib/useMounted";
 import { cn } from "@/lib/utils";
 import { RatingChips } from "./PickMeta";
 import { Poster } from "./Poster";
@@ -44,7 +45,8 @@ export interface BulkAddRequest {
 
 /**
  * Adds several titles to Radarr/Sonarr at once. Every title needs its own quality profile; "Set all to…" fills
- * them in one go. After submitting, each row follows its pick live.
+ * them in one go. After submitting, each row follows its pick live. The batch and row controls, StatusIcon,
+ * PosterStack and SwitchControl are shared with GetOwnedDialog.
  */
 export function BulkAddDialog({
   request,
@@ -64,7 +66,7 @@ export function BulkAddDialog({
   );
 }
 
-interface RowChoice {
+export interface RowChoice {
   profileId: string;
   /** Unset: "switch" when a fallback is available, else "wait". */
   ifNothingFits?: IfNothingFits;
@@ -195,7 +197,7 @@ function BulkAddFlow({ kind, picks, skipped, onSubmitted, onClose }: BulkAddRequ
         }}
       >
         <header className="flex items-end gap-4 border-b border-border px-5 pt-[max(1.25rem,env(safe-area-inset-top))] pr-14 pb-4 sm:pt-5">
-          <PosterStack picks={picks} />
+          <PosterStack titles={picks} />
           <div className="min-w-0">
             <DialogTitle className="text-balance">
               Add {plural(picks.length, "title")} to {name}
@@ -316,14 +318,14 @@ function outcomeOf(phase: RowPhase | undefined, livePick: Pick | undefined, movi
 }
 
 /** A few posters fanned out beside the title. */
-function PosterStack({ picks }: { picks: Pick[] }) {
-  const shown = picks.slice(0, 3);
+export function PosterStack({ titles }: { titles: { title: string; poster_url?: string }[] }) {
+  const shown = titles.slice(0, 3);
   const tilt = shown.length === 1 ? [""] : shown.length === 2 ? ["-rotate-6", "rotate-3"] : ["-rotate-8", "rotate-0", "rotate-8"];
   return (
     <div aria-hidden className="hidden shrink-0 items-end pl-1 sm:flex">
       {shown.map((p, i) => (
         <Poster
-          key={p.id}
+          key={i}
           src={p.poster_url}
           title={p.title}
           className={cn("w-12 origin-bottom rounded-md shadow-[0_10px_24px_-10px_rgb(0_0_0/0.7)] ring-2 ring-surface", i > 0 && "-ml-6", tilt[i])}
@@ -335,7 +337,7 @@ function PosterStack({ picks }: { picks: Pick[] }) {
 
 const FIELD_LABEL = "mb-1.5 block text-xs font-semibold text-text-muted";
 
-function BatchControls({
+export function BatchControls({
   name,
   movie,
   options,
@@ -453,7 +455,7 @@ function ControlSkeleton() {
   return <div aria-hidden className="h-9 animate-pulse rounded-[var(--radius-control)] bg-surface" />;
 }
 
-function RowControls({
+export function RowControls({
   title,
   movie,
   options,
@@ -462,6 +464,7 @@ function RowControls({
   fits,
   canFallBack,
   hint,
+  profileHint,
   onChange,
 }: {
   title: string;
@@ -473,6 +476,8 @@ function RowControls({
   canFallBack: boolean;
   /** Shown under the fallback choice when the rows' hints differ. */
   hint?: string;
+  /** Shown under the quality profile, e.g. the profile the movie has in Radarr now. */
+  profileHint?: string;
   onChange: (patch: Partial<RowChoice>) => void;
 }) {
   const profiles = options?.quality_profiles ?? [];
@@ -487,20 +492,23 @@ function RowControls({
   if (profiles.length === 0) return null;
   return (
     <div className={CONTROL_COLUMNS}>
-      <Select
-        value={choice.profileId}
-        onValueChange={(profileId) => onChange({ profileId })}
-        label={`Quality profile for ${title}`}
-        placeholder="Choose a quality profile"
-        // Dashed until chosen: every title needs one.
-        className={cn("w-full", choice.profileId === "" && "border-dashed border-text-muted/55")}
-      >
-        {profiles.map((p) => (
-          <SelectItem key={p.id} value={String(p.id)}>
-            {p.name}
-          </SelectItem>
-        ))}
-      </Select>
+      <div className="min-w-0">
+        <Select
+          value={choice.profileId}
+          onValueChange={(profileId) => onChange({ profileId })}
+          label={`Quality profile for ${title}`}
+          placeholder="Choose a quality profile"
+          // Dashed until chosen: every title needs one.
+          className={cn("w-full", choice.profileId === "" && "border-dashed border-text-muted/55")}
+        >
+          {profiles.map((p) => (
+            <SelectItem key={p.id} value={String(p.id)}>
+              {p.name}
+            </SelectItem>
+          ))}
+        </Select>
+        {profileHint && <p className="mt-1.5 text-xs leading-snug text-text-muted">{profileHint}</p>}
+      </div>
       {movie && (
         <div className="min-w-0">
           <FallbackSelect
@@ -587,7 +595,7 @@ function RowStatus({ pick, phase, movie }: { pick: Pick; phase: RowPhase; movie:
 
   return (
     <div className="flex items-start gap-2.5 text-sm">
-      <StatusIcon phase={phase} release={release} tone={label.tone} />
+      <StatusIcon muted={phase.phase === "exists"} release={release} tone={label.tone} />
       <div className="min-w-0 flex-1">
         <p className="font-medium break-words">{label.title}</p>
         {label.description && (
@@ -598,7 +606,7 @@ function RowStatus({ pick, phase, movie }: { pick: Pick; phase: RowPhase; movie:
         {release?.status === "waiting" && release.qualities.length > 0 && (
           <p className="nums mt-1 truncate text-xs text-text-muted">{release.qualities.map((q) => `${q.count} × ${q.quality}`).join(" · ")}</p>
         )}
-        {release && canSwitch && <SwitchControl pick={pick} check={release} />}
+        {release && canSwitch && <PickSwitchControl pick={pick} check={release} />}
       </div>
     </div>
   );
@@ -620,12 +628,13 @@ function statusLabel(phase: RowPhase, pick: Pick, release: ReleaseCheck | undefi
   }
 }
 
-function StatusIcon({ phase, release, tone }: { phase: RowPhase; release?: ReleaseCheck; tone: StatusLabel["tone"] }) {
+/** A row's status icon. `muted`: nothing was done because nothing needed doing (already in the library). */
+export function StatusIcon({ muted = false, release, tone }: { muted?: boolean; release?: ReleaseCheck; tone: StatusLabel["tone"] }) {
   const base = "mt-0.5 size-4 shrink-0";
   if (tone === "pending") return <Loader2 aria-hidden className={cn(base, "animate-spin text-accent")} />;
   if (tone === "success") return <Check aria-hidden className={cn(base, "text-success")} strokeWidth={2.5} />;
   if (tone === "danger") return <AlertCircle aria-hidden className={cn(base, "text-danger")} />;
-  if (phase.phase === "exists") return <Check aria-hidden className={cn(base, "text-text-muted")} />;
+  if (muted) return <Check aria-hidden className={cn(base, "text-text-muted")} />;
   switch (release?.status) {
     case "waiting":
       return <Clock aria-hidden className={cn(base, "text-warning")} />;
@@ -640,29 +649,49 @@ function StatusIcon({ phase, release, tone }: { phase: RowPhase; release?: Relea
   }
 }
 
-/** Radarr grabbed nothing, but other profiles would grab a release now: switch this title to one of them. */
-function SwitchControl({ pick, check }: { pick: Pick; check: ReleaseCheck }) {
+/** SwitchControl for an added pick: moves it to the profile with POST /api/picks/{id}/request/profile. */
+function PickSwitchControl({ pick, check }: { pick: Pick; check: ReleaseCheck }) {
   const qc = useQueryClient();
   const switchProfile = useSwitchProfile();
+
+  const switchTo = async (profile: ProfileOption) => {
+    try {
+      const updated = await switchProfile.mutateAsync({ pick, qualityProfileId: profile.id });
+      if (updated.request?.release?.status === "checking") awaitRelease(pick.id, `Switched to ${profile.name}`);
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 409)) throw err;
+      // Usually a check that is still running (started elsewhere): refresh, so the row shows it.
+      void qc.invalidateQueries({ queryKey: ["picks"] });
+      throw new Error(`Can't switch right now: ${err.message}`, { cause: err });
+    }
+  };
+
+  return <SwitchControl title={pick.title} check={check} onSwitch={switchTo} />;
+}
+
+/**
+ * Radarr grabbed nothing, but other profiles would grab a release now: switch this title to one of them.
+ * `onSwitch` moves the title and starts the search; it rejects with the error to show.
+ */
+export function SwitchControl({ title, check, onSwitch }: { title: string; check: ReleaseCheck; onSwitch: (profile: ProfileOption) => Promise<void> }) {
   const mounted = useMounted();
   const [profileId, setProfileId] = useState("");
+  const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const chosen = check.alternatives.find((a) => String(a.id) === profileId);
 
   const submit = async () => {
-    if (!chosen || switchProfile.isPending) return;
+    if (!chosen || pending) return;
     setError(null);
+    setPending(true);
     try {
-      const updated = await switchProfile.mutateAsync({ pick, qualityProfileId: chosen.id });
-      if (updated.request?.release?.status === "checking") awaitRelease(pick.id, `Switched to ${chosen.name}`);
+      await onSwitch(chosen);
     } catch (err) {
       const message = (err as Error).message;
-      const conflict = err instanceof ApiError && err.status === 409;
-      // Usually a check that is still running (started elsewhere): refresh, so the row shows it.
-      if (conflict) void qc.invalidateQueries({ queryKey: ["picks"] });
-      if (mounted.current) setError(conflict ? `Can't switch right now: ${message}` : message);
-      else toast.error(`Could not switch ${pick.title} to ${chosen.name}`, { description: message });
+      if (mounted.current) setError(message);
+      else toast.error(`Could not switch ${title} to ${chosen.name}`, { description: message });
     }
+    if (mounted.current) setPending(false);
   };
 
   return (
@@ -671,7 +700,7 @@ function SwitchControl({ pick, check }: { pick: Pick; check: ReleaseCheck }) {
         <Select
           value={profileId}
           onValueChange={setProfileId}
-          label={`Switch ${pick.title} to another quality profile`}
+          label={`Switch ${title} to another quality profile`}
           placeholder="Available now with another profile…"
           className="w-full sm:flex-1"
         >
@@ -686,8 +715,8 @@ function SwitchControl({ pick, check }: { pick: Pick; check: ReleaseCheck }) {
             </SelectItem>
           ))}
         </Select>
-        <Button size="sm" className="h-9" variant={chosen ? "primary" : "secondary"} disabled={!chosen || switchProfile.isPending} onClick={() => void submit()}>
-          {switchProfile.isPending ? (
+        <Button size="sm" className="h-9" variant={chosen ? "primary" : "secondary"} disabled={!chosen || pending} onClick={() => void submit()}>
+          {pending ? (
             <>
               <Loader2 className="animate-spin" /> Switching…
             </>
@@ -704,16 +733,4 @@ function SwitchControl({ pick, check }: { pick: Pick; check: ReleaseCheck }) {
       )}
     </div>
   );
-}
-
-/** False once the component has unmounted (the dialog closed). */
-function useMounted() {
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
-  return mounted;
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
@@ -111,21 +112,42 @@ type Movie struct {
 	QualityProfileID int
 	OriginalLanguage int  // language id, 0 when unknown
 	Available        bool // released as far as the movie's minimum availability requires
+	Monitored        bool
+	HasFile          bool
+	SizeOnDisk       int64  // bytes
+	FileQuality      string // the quality of the movie's file, e.g. Bluray-1080p; empty without a file
+}
+
+type movieJSON struct {
+	ID               int    `json:"id"`
+	TMDBID           int    `json:"tmdbId"`
+	Title            string `json:"title"`
+	Year             int    `json:"year"`
+	QualityProfileID int    `json:"qualityProfileId"`
+	IsAvailable      bool   `json:"isAvailable"`
+	Monitored        bool   `json:"monitored"`
+	HasFile          bool   `json:"hasFile"`
+	SizeOnDisk       int64  `json:"sizeOnDisk"`
+	OriginalLanguage struct {
+		ID int `json:"id"`
+	} `json:"originalLanguage"`
+	MovieFile *struct {
+		Quality qualityJSON `json:"quality"`
+	} `json:"movieFile"`
+}
+
+func (m movieJSON) movie() Movie {
+	out := Movie{ID: m.ID, TMDBID: m.TMDBID, Title: m.Title, Year: m.Year, QualityProfileID: m.QualityProfileID,
+		OriginalLanguage: m.OriginalLanguage.ID, Available: m.IsAvailable, Monitored: m.Monitored, HasFile: m.HasFile, SizeOnDisk: m.SizeOnDisk}
+	if m.MovieFile != nil {
+		out.FileQuality = m.MovieFile.Quality.Quality.Name
+	}
+	return out
 }
 
 // Movie returns the library movie with Radarr id id, or ErrNotFound.
 func (r *Radarr) Movie(ctx context.Context, id int) (Movie, error) {
-	var m struct {
-		ID               int    `json:"id"`
-		TMDBID           int    `json:"tmdbId"`
-		Title            string `json:"title"`
-		Year             int    `json:"year"`
-		QualityProfileID int    `json:"qualityProfileId"`
-		IsAvailable      bool   `json:"isAvailable"`
-		OriginalLanguage struct {
-			ID int `json:"id"`
-		} `json:"originalLanguage"`
-	}
+	var m movieJSON
 	err := r.c.get(ctx, "/api/v3/movie/"+strconv.Itoa(id), nil, &m)
 	if httpjson.IsStatus(err, http.StatusNotFound) {
 		return Movie{}, ErrNotFound
@@ -133,13 +155,33 @@ func (r *Radarr) Movie(ctx context.Context, id int) (Movie, error) {
 	if err != nil {
 		return Movie{}, err
 	}
-	return Movie{ID: m.ID, TMDBID: m.TMDBID, Title: m.Title, Year: m.Year, QualityProfileID: m.QualityProfileID,
-		OriginalLanguage: m.OriginalLanguage.ID, Available: m.IsAvailable}, nil
+	return m.movie(), nil
+}
+
+// MovieByTMDB returns the library movie with a TMDB id, or ErrNotFound.
+func (r *Radarr) MovieByTMDB(ctx context.Context, tmdbID int) (Movie, error) {
+	var ms []movieJSON
+	if err := r.c.get(ctx, "/api/v3/movie", url.Values{"tmdbId": {strconv.Itoa(tmdbID)}}, &ms); err != nil {
+		return Movie{}, err
+	}
+	// Match the id, in case a Radarr ignores the filter and lists every movie.
+	for _, m := range ms {
+		if m.TMDBID == tmdbID {
+			return m.movie(), nil
+		}
+	}
+	return Movie{}, ErrNotFound
 }
 
 // SetQualityProfile moves a library movie to another quality profile.
 func (r *Radarr) SetQualityProfile(ctx context.Context, movieID, profileID int) error {
 	return r.c.put(ctx, "/api/v3/movie/editor", map[string]any{"movieIds": []int{movieID}, "qualityProfileId": profileID}, nil)
+}
+
+// SetMonitored turns monitoring of a library movie on or off. Radarr only
+// searches for, and grabs, monitored movies.
+func (r *Radarr) SetMonitored(ctx context.Context, movieID int, monitored bool) error {
+	return r.c.put(ctx, "/api/v3/movie/editor", map[string]any{"movieIds": []int{movieID}, "monitored": monitored}, nil)
 }
 
 // Command is a Radarr command, such as a movie search.
@@ -251,14 +293,35 @@ func historyProtocol(p string) string {
 	return ""
 }
 
-// Pending lists the releases Radarr holds for a movie because of a delay profile.
-func (r *Radarr) Pending(ctx context.Context, movieID int) ([]Grab, error) {
+// QueueItem is a release in Radarr's download queue.
+type QueueItem struct {
+	Status   string // Radarr's queue status, e.g. downloading, paused, completed, or delay for a delay profile
+	Title    string
+	Quality  string
+	Size     int64 // bytes, 0 when unknown
+	SizeLeft int64
+	Indexer  string
+	Protocol string // torrent | usenet
+}
+
+// Progress is how much of the release has downloaded, 0-100; false when its size is unknown.
+func (q QueueItem) Progress() (float64, bool) {
+	if q.Size <= 0 {
+		return 0, false
+	}
+	done := float64(q.Size-min(max(q.SizeLeft, 0), q.Size)) / float64(q.Size) * 100
+	return math.Round(done*10) / 10, true
+}
+
+// Queue lists a movie's releases in Radarr's download queue.
+func (r *Radarr) Queue(ctx context.Context, movieID int) ([]QueueItem, error) {
 	var page struct {
 		Records []struct {
 			MovieID  int         `json:"movieId"`
 			Status   string      `json:"status"`
 			Title    string      `json:"title"`
 			Size     float64     `json:"size"`
+			SizeLeft float64     `json:"sizeleft"`
 			Indexer  string      `json:"indexer"`
 			Protocol string      `json:"protocol"`
 			Quality  qualityJSON `json:"quality"`
@@ -268,10 +331,27 @@ func (r *Radarr) Pending(ctx context.Context, movieID int) ([]Grab, error) {
 	if err := r.c.get(ctx, "/api/v3/queue", q, &page); err != nil {
 		return nil, err
 	}
-	var out []Grab
+	out := []QueueItem{}
 	for _, rec := range page.Records {
-		if rec.MovieID == movieID && strings.EqualFold(rec.Status, "delay") {
-			out = append(out, Grab{Title: rec.Title, Quality: rec.Quality.Quality.Name, Size: int64(rec.Size), Indexer: rec.Indexer, Protocol: rec.Protocol})
+		// Match the movie, in case a Radarr ignores the filter.
+		if rec.MovieID == movieID {
+			out = append(out, QueueItem{Status: rec.Status, Title: rec.Title, Quality: rec.Quality.Quality.Name,
+				Size: int64(rec.Size), SizeLeft: int64(rec.SizeLeft), Indexer: rec.Indexer, Protocol: rec.Protocol})
+		}
+	}
+	return out, nil
+}
+
+// Pending lists the releases Radarr holds for a movie because of a delay profile.
+func (r *Radarr) Pending(ctx context.Context, movieID int) ([]Grab, error) {
+	items, err := r.Queue(ctx, movieID)
+	if err != nil {
+		return nil, err
+	}
+	var out []Grab
+	for _, it := range items {
+		if strings.EqualFold(it.Status, "delay") {
+			out = append(out, Grab{Title: it.Title, Quality: it.Quality, Size: it.Size, Indexer: it.Indexer, Protocol: it.Protocol})
 		}
 	}
 	return out, nil

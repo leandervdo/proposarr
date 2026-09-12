@@ -109,6 +109,19 @@ var migrations = [][]string{
 	{
 		`ALTER TABLE requests ADD COLUMN release TEXT`,
 	},
+	{
+		`ALTER TABLE runs ADD COLUMN owned TEXT NOT NULL DEFAULT '[]'`,
+		// Only the latest search per title is kept.
+		`CREATE TABLE library_searches (
+			kind TEXT NOT NULL,
+			tmdb_id INTEGER NOT NULL,
+			target_id INTEGER NOT NULL DEFAULT 0,
+			quality_profile TEXT NOT NULL DEFAULT '',
+			release TEXT,
+			requested_at TEXT NOT NULL,
+			PRIMARY KEY (kind, tmdb_id)
+		)`,
+	},
 }
 
 // SQLite is the Store backed by a single SQLite file.
@@ -141,10 +154,12 @@ func Open(path string) (*SQLite, error) {
 		db.Close()
 		return nil, fmt.Errorf("store: mark interrupted runs: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE requests SET release = json_set(release, '$.status', 'searching')
-		WHERE json_valid(release) AND json_extract(release, '$.status') = 'checking'`); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("store: mark interrupted release checks: %w", err)
+	for _, table := range []string{"requests", "library_searches"} {
+		if _, err := db.ExecContext(ctx, `UPDATE `+table+` SET release = json_set(release, '$.status', 'searching')
+			WHERE json_valid(release) AND json_extract(release, '$.status') = 'checking'`); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("store: mark interrupted release checks: %w", err)
+		}
 	}
 	return s, nil
 }
@@ -220,15 +235,19 @@ func (s *SQLite) FinishRun(ctx context.Context, id int64, run *pipeline.Run, run
 		if jerr != nil {
 			return jerr
 		}
+		owned, jerr := json.Marshal(nonNil(run.Owned))
+		if jerr != nil {
+			return fmt.Errorf("store: encode owned: %w", jerr)
+		}
 		u := run.Usage
 		res, err = tx.ExecContext(ctx, `UPDATE runs SET status = ?, error = ?, finished_at = ?,
 			cost_usd = ?, input_tokens = ?, output_tokens = ?, num_turns = ?, session_id = ?,
 			library_count = ?, history_count = ?, candidate_count = ?, pick_count = ?,
-			warnings = ?, rejected = ?, profile = ? WHERE id = ?`,
+			warnings = ?, rejected = ?, owned = ?, profile = ? WHERE id = ?`,
 			status, errText, finished,
 			run.CostUSD, u.InputTokens+u.CacheCreationInputTokens+u.CacheReadInputTokens, u.OutputTokens, run.NumTurns, run.SessionID,
 			run.LibraryCount, run.HistoryCount, run.CandidateCount, len(run.Picks),
-			warnings, rejected, prof, id)
+			warnings, rejected, string(owned), prof, id)
 	}
 	if err != nil {
 		return fmt.Errorf("store: finish run: %w", err)
@@ -292,20 +311,20 @@ func runJSON(run *pipeline.Run) (warnings, rejected string, prof any, err error)
 
 const runColumns = `id, kind, vibe, use_taste, model, effort, status, error, started_at, finished_at, cost_usd,
 	input_tokens, output_tokens, num_turns, session_id, library_count, history_count,
-	candidate_count, pick_count, warnings, rejected`
+	candidate_count, pick_count, warnings, rejected, owned`
 
 type scanner interface{ Scan(dest ...any) error }
 
 func scanRun(sc scanner, extra ...any) (Run, error) {
 	var (
-		r                     Run
-		kind, status, started string
-		finished              sql.NullString
-		warnings, rejected    string
+		r                         Run
+		kind, status, started     string
+		finished                  sql.NullString
+		warnings, rejected, owned string
 	)
 	dest := []any{&r.ID, &kind, &r.Vibe, &r.UseTaste, &r.Model, &r.Effort, &status, &r.Error, &started, &finished, &r.CostUSD,
 		&r.InputTokens, &r.OutputTokens, &r.NumTurns, &r.SessionID, &r.LibraryCount, &r.HistoryCount,
-		&r.CandidateCount, &r.PickCount, &warnings, &rejected}
+		&r.CandidateCount, &r.PickCount, &warnings, &rejected, &owned}
 	if err := sc.Scan(append(dest, extra...)...); err != nil {
 		return Run{}, err
 	}
@@ -321,6 +340,9 @@ func scanRun(sc scanner, extra ...any) (Run, error) {
 		return Run{}, err
 	}
 	if r.Rejected, err = decodeSlice[pipeline.Rejected](rejected); err != nil {
+		return Run{}, err
+	}
+	if r.Owned, err = decodeSlice[pipeline.OwnedMatch](owned); err != nil {
 		return Run{}, err
 	}
 	return r, nil
@@ -611,6 +633,65 @@ func (s *SQLite) UpdateRequestRelease(ctx context.Context, pickID int64, quality
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (s *SQLite) RecordLibrarySearch(ctx context.Context, ls LibrarySearch) error {
+	if ls.RequestedAt.IsZero() {
+		ls.RequestedAt = s.now()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO library_searches (kind, tmdb_id, target_id, quality_profile, release, requested_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT (kind, tmdb_id) DO UPDATE SET target_id = excluded.target_id, quality_profile = excluded.quality_profile,
+			release = excluded.release, requested_at = excluded.requested_at`,
+		string(ls.Kind), ls.TMDBID, ls.TargetID, ls.QualityProfile, nullJSON(ls.Release), fmtTime(ls.RequestedAt))
+	if err != nil {
+		return fmt.Errorf("store: record library search: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLite) UpdateLibrarySearch(ctx context.Context, kind media.Kind, tmdbID int, qualityProfile string, release json.RawMessage) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE library_searches SET quality_profile = ?, release = ? WHERE kind = ? AND tmdb_id = ?`,
+		qualityProfile, nullJSON(release), string(kind), tmdbID)
+	if err != nil {
+		return fmt.Errorf("store: update library search: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *SQLite) LibrarySearches(ctx context.Context, kind media.Kind, tmdbIDs []int) (map[int]LibrarySearch, error) {
+	out := map[int]LibrarySearch{}
+	if len(tmdbIDs) == 0 {
+		return out, nil
+	}
+	ids, _ := json.Marshal(tmdbIDs)
+	rows, err := s.db.QueryContext(ctx, `SELECT tmdb_id, target_id, quality_profile, release, requested_at FROM library_searches
+		WHERE kind = ? AND tmdb_id IN (SELECT value FROM json_each(?))`, string(kind), string(ids))
+	if err != nil {
+		return nil, fmt.Errorf("store: library searches: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			ls        = LibrarySearch{Kind: kind}
+			release   sql.NullString
+			requested string
+		)
+		if err := rows.Scan(&ls.TMDBID, &ls.TargetID, &ls.QualityProfile, &release, &requested); err != nil {
+			return nil, fmt.Errorf("store: library searches: %w", err)
+		}
+		if ls.RequestedAt, err = parseTime(requested); err != nil {
+			return nil, err
+		}
+		if release.String != "" {
+			ls.Release = json.RawMessage(release.String)
+		}
+		out[ls.TMDBID] = ls
+	}
+	return out, rows.Err()
 }
 
 // nullJSON stores empty JSON as NULL.

@@ -42,7 +42,7 @@ func (p *Pipeline) Run(ctx context.Context, req Request) (*Run, error) {
 		return nil, errors.New("open search needs a description of what you are looking for")
 	}
 
-	run := &Run{Kind: req.Kind, Vibe: req.Vibe, OpenSearch: req.OpenSearch, Model: req.Model, Effort: req.Effort, StartedAt: now(), Picks: []Pick{}}
+	run := &Run{Kind: req.Kind, Vibe: req.Vibe, OpenSearch: req.OpenSearch, Model: req.Model, Effort: req.Effort, StartedAt: now(), Picks: []Pick{}, Owned: []OwnedMatch{}}
 	fail := func(err error) (*Run, error) {
 		run.FinishedAt = now()
 		return run, err
@@ -114,7 +114,7 @@ func (p *Pipeline) Run(ctx context.Context, req Request) (*Run, error) {
 		system, prompt = systemPrompt(req.Kind), userPrompt(req, prof, cands)
 	}
 
-	schema, err := pickSchema(maxItems)
+	schema, err := pickSchema(maxItems, req.OpenSearch)
 	if err != nil {
 		return fail(err)
 	}
@@ -144,13 +144,16 @@ func (p *Pipeline) Run(ctx context.Context, req Request) (*Run, error) {
 		return fail(err)
 	}
 
-	raw, err := decodePicks(res)
+	raw, owned, err := decodePicks(res)
 	if err != nil {
 		return fail(err)
 	}
 
 	p.progress("Verifying %d picks…", len(raw))
 	p.verify(ctx, req, run, raw, cands, excluded, untrackedTitles(lib, hist), prof)
+	if req.OpenSearch {
+		run.Owned = ownedMatches(owned, lib, run.Rejected)
+	}
 	run.FinishedAt = now()
 	return run, nil
 }

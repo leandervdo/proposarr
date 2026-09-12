@@ -1,48 +1,65 @@
-// Release checks finish in the background. Their toasts go to the browser that started them: an open
-// accept dialog reports its own result, and settleRelease reports the rest when pick.updated arrives.
+// Release checks finish in the background. Their toasts go to the browser that started them: an open dialog
+// reports its own result, and settleRelease and settleOwnedRelease report the rest when pick.updated or
+// owned.updated arrives.
 import { useEffect } from "react";
 import { toast } from "sonner";
-import type { Pick, ReleaseCheck, ReleaseInfo } from "@/api/types";
+import type { OwnedTitle, Pick, ReleaseCheck, ReleaseInfo } from "@/api/types";
 import { fileSize } from "./format";
 
-/** Pick id → toast title prefix ("Added to Radarr", "Switched to …"), for checks this session started. */
-const awaiting = new Map<number, string>();
-/** Picks whose accept dialog is open. */
-const shown = new Set<number>();
+/** A pick id, or ownedReleaseKey(tmdbId) for a search for a movie that is already in Radarr. */
+export type ReleaseKey = number | `movie:${number}`;
 
-export function awaitRelease(id: number, prefix: string) {
-  awaiting.set(id, prefix);
+export const ownedReleaseKey = (tmdbId: number): ReleaseKey => `movie:${tmdbId}`;
+
+/** Key → toast title prefix ("Added to Radarr", "Switched to …", a movie's title), for checks this session started. */
+const awaiting = new Map<ReleaseKey, string>();
+/** Checks a dialog is showing. */
+const shown = new Set<ReleaseKey>();
+
+export function awaitRelease(key: ReleaseKey, prefix: string) {
+  awaiting.set(key, prefix);
 }
 
-export const isAwaitingRelease = (id: number) => awaiting.has(id);
+export const isAwaitingRelease = (key: ReleaseKey) => awaiting.has(key);
 
 /** The prefix for a check this session started, forgotten once taken so the result is reported once. */
-export function takeAwaitedRelease(id: number): string | undefined {
-  const prefix = awaiting.get(id);
-  awaiting.delete(id);
+export function takeAwaitedRelease(key: ReleaseKey): string | undefined {
+  const prefix = awaiting.get(key);
+  awaiting.delete(key);
   return prefix;
 }
 
-/** While mounted, the accept dialog for this pick reports its result instead of settleRelease. */
-export function useReleaseShown(id: number) {
+/** While mounted, the dialog showing this check reports its result instead of a toast. */
+export function useReleaseShown(key: ReleaseKey) {
   useEffect(() => {
-    shown.add(id);
+    shown.add(key);
     return () => {
-      shown.delete(id);
+      shown.delete(key);
     };
-  }, [id]);
+  }, [key]);
 }
 
 /** For every pick.updated: toasts a finished check this session started whose dialog was closed. */
 export function settleRelease(pick: Pick) {
-  const check = pick.request?.release;
-  if (!check || check.status === "checking" || shown.has(pick.id)) return;
-  const prefix = takeAwaitedRelease(pick.id);
-  if (prefix) announceRelease(prefix, check);
+  settle(pick.id, pick.request?.release);
 }
 
-/** Toasts a finished check. `prefix` is "Added to Radarr" or "Switched to <profile>". */
-export function announceRelease(prefix: string, check: ReleaseCheck) {
+/** For every owned.updated: toasts a finished search this session started whose dialog was closed. */
+export function settleOwnedRelease(title: OwnedTitle) {
+  settle(ownedReleaseKey(title.tmdb_id), title.search?.release, "search again with that profile");
+}
+
+function settle(key: ReleaseKey, check: ReleaseCheck | undefined, switchHint?: string) {
+  if (!check || check.status === "checking" || shown.has(key)) return;
+  const prefix = takeAwaitedRelease(key);
+  if (prefix) announceRelease(prefix, check, switchHint);
+}
+
+/**
+ * Toasts a finished check. `prefix` is "Added to Radarr", "Switched to <profile>" or the title of a movie searched
+ * for again; `switchHint` says how to use another profile that would grab a release.
+ */
+export function announceRelease(prefix: string, check: ReleaseCheck, switchHint = "open the title to switch") {
   const from = check.switched_from;
   const switchNote = from ? `Switched from ${from} to ${check.profile}. ` : "";
   switch (check.status) {
@@ -72,7 +89,7 @@ export function announceRelease(prefix: string, check: ReleaseCheck) {
       const description = from
         ? `Switched from ${from} to ${check.profile}, but Radarr still found nothing to grab`
         : best
-          ? `${best.name} would grab one: open the title to switch`
+          ? `${best.name} would grab one: ${switchHint}`
           : check.found === 0
             ? "No releases on your indexers yet"
             : `${check.found} found, none fit any of your profiles`;

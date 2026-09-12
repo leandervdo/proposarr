@@ -159,7 +159,8 @@ Prioritize %s that match these criteria:
 - related_to is an empty array.
 - reason is one sentence on how the %s matches the request.
 - score is 0-100 and means how well the %s fits the request, not how good it is: 90 or more fits every part of it, below 70 misses a requirement (for example the wrong decade). Return fewer titles rather than titles you would score below 70.
-`, one, one, one)
+- owned lists the titles from "Titles I already have" that match the request under the same hard requirements, with the title and year as written there (at most %d). Return an empty list when none match. A title in owned must never appear in picks.
+`, one, one, one, maxOwned)
 	return b.String()
 }
 
@@ -212,7 +213,12 @@ func truncate(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-func pickSchema(maxPicks int) (string, error) {
+// maxOwned is the most owned matches an open search reports.
+const maxOwned = 50
+
+// pickSchema is the structured output of a run. With owned (open search) it
+// also asks for the library titles that match the description.
+func pickSchema(maxPicks int, owned bool) (string, error) {
 	str := map[string]any{"type": "string"}
 	integer := map[string]any{"type": "integer"}
 	item := map[string]any{
@@ -229,13 +235,23 @@ func pickSchema(maxPicks int) (string, error) {
 			"source":     map[string]any{"type": "string", "enum": []string{"candidate", "free"}},
 		},
 	}
+	props := map[string]any{
+		"picks": map[string]any{"type": "array", "maxItems": maxPicks, "items": item},
+	}
 	schema := map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
 		"required":             []string{"picks"},
-		"properties": map[string]any{
-			"picks": map[string]any{"type": "array", "maxItems": maxPicks, "items": item},
-		},
+		"properties":           props,
+	}
+	if owned {
+		props["owned"] = map[string]any{"type": "array", "maxItems": maxOwned, "items": map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []string{"title", "year"},
+			"properties":           map[string]any{"title": str, "year": integer},
+		}}
+		schema["required"] = []string{"picks", "owned"}
 	}
 	b, err := json.Marshal(schema)
 	if err != nil {

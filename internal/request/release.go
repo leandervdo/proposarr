@@ -19,6 +19,7 @@ import (
 // may switch the quality profile and ask Radarr to search again.
 type Searcher interface {
 	Movie(ctx context.Context, id int) (arr.Movie, error)
+	MovieByTMDB(ctx context.Context, tmdbID int) (arr.Movie, error)
 	MovieSearches(ctx context.Context, movieID int) ([]arr.Command, error)
 	Command(ctx context.Context, id int) (arr.Command, error)
 	SearchMovie(ctx context.Context, movieID int) (arr.Command, error)
@@ -26,6 +27,7 @@ type Searcher interface {
 	Pending(ctx context.Context, movieID int) ([]arr.Grab, error)
 	Releases(ctx context.Context, movieID int) ([]arr.Release, error)
 	SetQualityProfile(ctx context.Context, movieID, profileID int) error
+	SetMonitored(ctx context.Context, movieID int, monitored bool) error
 }
 
 // Fallback is what to do when Radarr's search finds releases for a movie but
@@ -119,7 +121,14 @@ func (r *Requester) followNewMovie(ctx context.Context, movieID int, profile arr
 		}
 		return cmds[0], true, nil
 	}
-	check := r.followSearch(ctx, movieID, 0, profile, profiles, find)
+	return r.followWithFallback(ctx, movieID, 0, profile, profiles, fallback, find)
+}
+
+// followWithFallback follows a search like followSearch. When nothing fits the
+// profile and fallback is FallbackSwitch, it switches once to the highest-ranked
+// profile below it that would grab a release, and has Radarr search again.
+func (r *Requester) followWithFallback(ctx context.Context, movieID, grabsBefore int, profile arr.QualityProfile, profiles []arr.QualityProfile, fallback Fallback, find func(context.Context) (arr.Command, bool, error)) ReleaseCheck {
+	check := r.followSearch(ctx, movieID, grabsBefore, profile, profiles, find)
 	if fallback != FallbackSwitch || check.Status != CheckWaiting {
 		return check
 	}
@@ -149,6 +158,15 @@ func (r *Requester) startSwitch(ctx context.Context, movieID int, profile arr.Qu
 	if err := r.RadarrSearch.SetQualityProfile(ctx, movieID, profile.ID); err != nil {
 		return nil, fmt.Errorf("set the quality profile: %w", err)
 	}
+	// A switch never switches again on its own.
+	return r.startSearch(ctx, movieID, len(grabs), profile, profiles, FallbackWait), nil
+}
+
+// startSearch has Radarr search a library movie and returns how to follow that
+// search. grabsBefore is the number of grabs in the movie's history before
+// anything was changed. A search that did not start is reported by the follow,
+// because the movie may already have been changed.
+func (r *Requester) startSearch(ctx context.Context, movieID, grabsBefore int, profile arr.QualityProfile, profiles []arr.QualityProfile, fallback Fallback) func(context.Context) ReleaseCheck {
 	cmd, err := r.RadarrSearch.SearchMovie(ctx, movieID)
 	if err != nil {
 		msg := fmt.Sprintf("start Radarr's search: %v", err)
@@ -156,15 +174,15 @@ func (r *Requester) startSwitch(ctx context.Context, movieID int, profile arr.Qu
 			check := Checking(profile.Name)
 			check.Status, check.Error = CheckFailed, msg
 			return check
-		}, nil
+		}
 	}
 	find := func(ctx context.Context) (arr.Command, bool, error) {
 		c, err := r.RadarrSearch.Command(ctx, cmd.ID)
 		return c, err == nil, err
 	}
 	return func(ctx context.Context) ReleaseCheck {
-		return r.followSearch(ctx, movieID, len(grabs), profile, profiles, find)
-	}, nil
+		return r.followWithFallback(ctx, movieID, grabsBefore, profile, profiles, fallback, find)
+	}
 }
 
 // followSearch waits for a Radarr search of a movie, found by find, and reports
@@ -278,6 +296,52 @@ func (r *Requester) SwitchProfile(ctx context.Context, item Item, movieID, profi
 	if err != nil {
 		return Result{}, fmt.Errorf("Radarr %s: %w", item.Label(), err)
 	}
+	return Result{App: "Radarr", ID: movie.ID, Title: movie.Title, QualityProfile: profiles[i].Name, Follow: follow}, nil
+}
+
+// SearchExisting gets a movie that is in Radarr but has no file. It monitors
+// the movie when it is not, moves it to profileID when that differs, and has
+// Radarr search; Result.Follow follows that search exactly like after an add,
+// including fallback. The profile is always the user's explicit choice.
+func (r *Requester) SearchExisting(ctx context.Context, tmdbID, profileID int, fallback Fallback) (Result, error) {
+	if r.Radarr == nil || r.RadarrSearch == nil {
+		return Result{}, fmt.Errorf("Radarr: %w", ErrNotConfigured)
+	}
+	movie, err := r.RadarrSearch.MovieByTMDB(ctx, tmdbID)
+	if errors.Is(err, arr.ErrNotFound) {
+		return Result{}, fmt.Errorf("movie tmdb:%d: %w", tmdbID, ErrNotInLibrary)
+	}
+	if err != nil {
+		return Result{}, fmt.Errorf("Radarr movie tmdb:%d: %w", tmdbID, err)
+	}
+	label := media.Label(movie.Title, movie.Year)
+	if movie.HasFile {
+		return Result{}, fmt.Errorf("%s: %w", label, ErrHasFile)
+	}
+	profiles, err := r.Radarr.QualityProfiles(ctx)
+	if err != nil {
+		return Result{}, fmt.Errorf("Radarr quality profiles: %w", err)
+	}
+	i := slices.IndexFunc(profiles, func(p arr.QualityProfile) bool { return p.ID == profileID })
+	if i < 0 {
+		return Result{}, fmt.Errorf("Radarr quality profile %d: %w", profileID, ErrUnknownProfile)
+	}
+	// Counted before anything changes, so grabs from earlier searches are not reported as new.
+	grabs, err := r.RadarrSearch.Grabs(ctx, movie.ID)
+	if err != nil {
+		return Result{}, fmt.Errorf("Radarr %s: read Radarr's history: %w", label, err)
+	}
+	if !movie.Monitored {
+		if err := r.RadarrSearch.SetMonitored(ctx, movie.ID, true); err != nil {
+			return Result{}, fmt.Errorf("Radarr %s: monitor the movie: %w", label, err)
+		}
+	}
+	if movie.QualityProfileID != profileID {
+		if err := r.RadarrSearch.SetQualityProfile(ctx, movie.ID, profileID); err != nil {
+			return Result{}, fmt.Errorf("Radarr %s: set the quality profile: %w", label, err)
+		}
+	}
+	follow := r.startSearch(ctx, movie.ID, len(grabs), profiles[i], profiles, fallback)
 	return Result{App: "Radarr", ID: movie.ID, Title: movie.Title, QualityProfile: profiles[i].Name, Follow: follow}, nil
 }
 

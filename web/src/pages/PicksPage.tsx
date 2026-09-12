@@ -9,6 +9,7 @@ import { usePicks, useRuns, useStartRun, useStatus } from "@/api/queries";
 import type { Kind, Pick, Run, VerdictFilter } from "@/api/types";
 import { AcceptDialog } from "@/components/AcceptDialog";
 import { EmptyState, ErrorNote } from "@/components/EmptyState";
+import { OwnedPanel } from "@/components/OwnedPanel";
 import { PickCard } from "@/components/PickCard";
 import { SelectionBar } from "@/components/SelectionBar";
 import { Button } from "@/components/ui/button";
@@ -115,6 +116,8 @@ export function PicksPage() {
   const succeeded = kindRuns.filter((r) => r.status === "succeeded");
   const shownRun: Run | undefined = runParam === "latest" ? succeeded[0] : kindRuns.find((r) => r.id === Number(runParam));
   const shownSearch = isOpenSearch(shownRun);
+  // Library titles the shown search matched; the search leaves them out of its picks.
+  const ownedCount = shownSearch ? (shownRun?.owned?.length ?? 0) : 0;
   // A failed or rate-limited run newer than the one on screen.
   const newerProblem = runParam === "latest" ? kindRuns.find((r) => (r.status === "failed" || r.status === "rate_limited") && (!shownRun || r.id > shownRun.id)) : undefined;
 
@@ -200,7 +203,7 @@ export function PicksPage() {
             </div>
           )}
 
-          {shownRun && all.length > 0 && (
+          {shownRun && (all.length > 0 || ownedCount > 0) && (
             <p className="mb-5 text-sm text-text-muted">
               {shownSearch ? (
                 <>
@@ -215,10 +218,16 @@ export function PicksPage() {
             </p>
           )}
 
+          {shownRun && ownedCount > 0 && !picks.isPending && !picks.isError && <OwnedPanel key={shownRun.id} run={shownRun} hasPicks={all.length > 0} />}
+
           {picks.isPending ? (
             <PickGridSkeleton />
           ) : picks.isError ? (
             <ErrorNote title="Could not load picks" message={picks.error.message} onRetry={() => void picks.refetch()} />
+          ) : all.length === 0 && ownedCount > 0 ? (
+            <EmptyState icon={Search} title="No new picks">
+              <p>Claude found nothing for this search that you don't already have.</p>
+            </EmptyState>
           ) : all.length === 0 ? (
             <EmptyState icon={Clapperboard} title="No picks yet">
               {useTaste ? (

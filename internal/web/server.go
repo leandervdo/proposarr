@@ -32,6 +32,9 @@ type Adder interface {
 	Add(ctx context.Context, item request.Item, ch request.Chooser) (request.Result, error)
 	// SwitchProfile moves an added movie to another quality profile and searches again.
 	SwitchProfile(ctx context.Context, item request.Item, movieID, profileID int) (request.Result, error)
+	// SearchExisting monitors a movie already in Radarr, moves it to profileID
+	// when that differs, and has Radarr search for it.
+	SearchExisting(ctx context.Context, tmdbID, profileID int, fallback request.Fallback) (request.Result, error)
 }
 
 // AppCatalog lists the quality profiles and root folders of an *arr app.
@@ -67,7 +70,10 @@ type Options struct {
 	Adder      Adder
 	App        func(app string) (catalog AppCatalog, defaultRootFolder string, ok bool)
 	Library    func(ctx context.Context, kind media.Kind) ([]media.Title, error)
-	Check      func(ctx context.Context) []CheckResult
+	// Radarr reads library movies live, for owned matches. It returns nil when
+	// Radarr is not configured.
+	Radarr func() RadarrLibrary
+	Check  func(ctx context.Context) []CheckResult
 	// Title fetches one title's details from TMDB, with streaming providers for
 	// region. An unknown id returns an error wrapping tmdb.ErrNotFound.
 	Title func(ctx context.Context, kind media.Kind, tmdbID int, region string) (tmdb.FullDetails, error)
@@ -95,11 +101,12 @@ type Server struct {
 	closed    bool
 	running   map[media.Kind]*activeRun
 	following map[int64]bool // picks whose release check runs in the background
+	searching map[int]bool   // library movies, by TMDB id, whose search runs in the background
 }
 
 func New(o Options) *Server {
 	s := &Server{o: o, log: o.Logger, now: o.Now, events: newHub(), titles: newTitleCache(titleCacheTTL, titleCacheSize),
-		running: map[media.Kind]*activeRun{}, following: map[int64]bool{}}
+		running: map[media.Kind]*activeRun{}, following: map[int64]bool{}, searching: map[int]bool{}}
 	if s.log == nil {
 		s.log = slog.New(slog.DiscardHandler)
 	}
@@ -124,6 +131,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/settings/test", s.testSettings)
 	mux.HandleFunc("GET /api/runs", s.listRuns)
 	mux.HandleFunc("GET /api/runs/{id}", s.getRun)
+	mux.HandleFunc("GET /api/runs/{id}/owned", s.runOwned)
 	mux.HandleFunc("POST /api/runs", s.createRun)
 	mux.HandleFunc("GET /api/picks", s.listPicks)
 	mux.HandleFunc("POST /api/picks/{id}/verdict", s.setVerdict)
@@ -131,6 +139,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/picks/{id}/request/profile", s.switchProfile)
 	mux.HandleFunc("GET /api/apps/{app}/options", s.appOptions)
 	mux.HandleFunc("GET /api/library", s.library)
+	mux.HandleFunc("POST /api/library/movies/{tmdb_id}/search", s.searchLibraryMovie)
 	mux.HandleFunc("GET /api/titles/{kind}/{tmdb_id}", s.titleDetails)
 	mux.HandleFunc("GET /api/events", s.streamEvents)
 	mux.HandleFunc("/", s.static)

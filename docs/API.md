@@ -21,8 +21,30 @@ interface Run {
   cost_usd: number; input_tokens: number; output_tokens: number; num_turns: number;
   session_id?: string; library_count: number; history_count: number;
   candidate_count: number; pick_count: number; warnings: string[]; rejected: Rejected[];
+  owned: OwnedMatch[];  // open search: library titles that match the description, see "Owned matches"; [] otherwise
   profile?: Profile; // only on GET /api/runs/{id}
 }
+
+interface OwnedMatch { tmdb_id: number; title: string; year?: number }
+
+// An owned match with its live state in Radarr/Sonarr.
+interface OwnedTitle {
+  tmdb_id: number; kind: Kind; title: string; year?: number; poster_url?: string;
+  // movies: downloaded | downloading | missing | unmonitored | unreleased | unknown; series: in_library
+  status: "downloaded" | "downloading" | "missing" | "unmonitored" | "unreleased" | "unknown" | "in_library";
+  radarr?: {                    // movies, when Radarr could be read
+    id: number; monitored: boolean; has_file: boolean; available: boolean;
+    quality_profile_id: number; quality_profile: string;
+    file_quality?: string;      // has_file: e.g. "Bluray-1080p"
+    size_on_disk?: number;      // bytes
+    queue?: { status: string; progress?: number; quality?: string; title?: string };  // in Radarr's download queue; progress 0–100
+  };
+  search?: LibrarySearch;       // the latest search Proposarr started for this movie
+  error?: string;               // status unknown: why Radarr could not be read
+}
+
+// A search for a movie already in Radarr, started with POST /api/library/movies/{tmdb_id}/search.
+interface LibrarySearch { quality_profile: string; requested_at: string; release: ReleaseCheck }
 
 interface Request {
   pick_id: number; app: "radarr" | "sonarr"; target_id?: number;
@@ -114,6 +136,8 @@ interface RootFolder { id: number; path: string; free_space: number }
 | GET | `/api/apps/{radarr\|sonarr}/options` | | `{quality_profiles: QualityProfile[], root_folders: RootFolder[], default_root_folder: string}` |
 | POST | `/api/picks/{id}/request` | `{quality_profile_id: number, root_folder?: string, if_nothing_fits?: "switch" \| "wait"}` | `Pick` with `request` and verdict `accepted`. For a Radarr movie `request.release` has status `checking`; see "Release check". `if_nothing_fits` defaults to `wait`; it is ignored for series and when no profile is ranked below the chosen one in `radarr.profile_order`. `400` without `quality_profile_id` (there is no default), for another `if_nothing_fits`, or when several root folders exist and none was given or configured. `409` when the title is already in the library |
 | POST | `/api/picks/{id}/request/profile` | `{quality_profile_id: number}` | `Pick` whose `request` has the new `quality_profile` and `release.status` `checking`, after moving the added movie to that profile in Radarr and starting Radarr's search. `400` without or with an unknown `quality_profile_id`, or for a series. `409` when the pick was not added to Radarr, the movie is no longer there, or its release check is still running. `502` when Radarr fails |
+| GET | `/api/runs/{id}/owned` | | `OwnedTitle[]` in the order of `run.owned`, with live state; see "Owned matches". `404` when the run does not exist |
+| POST | `/api/library/movies/{tmdb_id}/search` | `{quality_profile_id: number, if_nothing_fits?: "switch" \| "wait"}` | `OwnedTitle` whose `search.release.status` is `checking`. Monitors the movie in Radarr when it is not, moves it to `quality_profile_id` when that differs, starts Radarr's search and follows it; see "Owned matches". `400` without or with an unknown `quality_profile_id` (there is no default), or for another `if_nothing_fits`. `404` when the movie is not in Radarr. `409` when it already has a file or a search Proposarr started for it is still being followed. `502` when Radarr fails |
 | GET | `/api/library?kind=` | | `{kind, titles: LibraryTitle[], profile: Profile \| null}` |
 | GET | `/api/titles/{movies\|series}/{tmdb_id}` | | `TitleDetails`. Fetched live from TMDB with credits, videos and watch providers, and ratings from Radarr (movies) or Sonarr (series); cached in memory for 1 hour. `404` when TMDB does not know the id, `400` when TMDB is not configured. A ratings failure only leaves `ratings` absent |
 | GET | `/api/events` | | Server-sent events, see below |
@@ -142,10 +166,21 @@ A run normally ranks candidates against the taste profile (`use_taste: true`). W
 
 - No watch history is read, no taste profile is built and no TMDB candidate list is gathered. The run's `history_count` and `candidate_count` are 0 and `profile` is absent.
 - Claude suggests titles from the description alone. Every suggestion is resolved on TMDB by title and year (the same check as free picks) and dropped when it does not resolve.
-- Titles already in the library, accepted, ignored, postponed or requested are still left out. The owned titles are listed in the prompt (up to the profile size) so Claude avoids them.
+- Titles already in the library, accepted, ignored, postponed or requested are still left out. The owned titles are listed in the prompt (up to the profile size) so Claude avoids them. Library titles that match the description are reported in `run.owned` instead; see "Owned matches".
 - Picks have `source: "free"` and may have an empty `related_to`; `reason` says how the title matches the description.
 - Explicit constraints in the description (decade, country, language, genre) are hard requirements. Claude scores each suggestion on how well it fits the description; suggestions below 70 are dropped, so a search can return fewer picks rather than off-target ones.
 - Ranking uses real ratings, not Claude's estimate. Claude suggests about twice the pick count (at most 50); after verification each remaining pick's rating score is the mean of the available values among IMDb × 10 (only with at least 1,000 votes) and the Rotten Tomatoes critic score. Picks are ordered by that score, the best `picks` are kept, and `score` is the rating score (rounded). A pick without either rating keeps Claude's score and sorts after rated picks.
+
+## Owned matches
+
+An open search leaves out titles you already have, so a search for a franchise you own would only show look-alikes. `run.owned` names the owned titles that match instead:
+
+- Claude's structured output for an open search has an `owned: {title, year}[]` list (at most 50) next to `picks`: titles from the "Titles I already have" list in the prompt that match the description, under the same hard constraints. Each entry is kept only when it matches a library title by normalised title and a year within one, and takes that title's TMDB id. Suggestions Claude makes that are dropped because they are in the library (the library, not verdicts or requests) are added too, since the prompt lists at most `top_titles` owned titles. Duplicates are removed; Claude's order is kept, then the dropped suggestions in their order.
+- Taste runs and runs stored before this change have `owned: []`.
+
+`GET /api/runs/{id}/owned` reads each match live. Movies come from Radarr (`GET /api/v3/movie?tmdbId=`, and the download queue), a few at a time; `status` is the first that applies: `downloaded` (has a file), `downloading` (in the queue), `unreleased` (not available for its minimum availability), `unmonitored`, else `missing`. A title that is no longer in Radarr or cannot be read is `unknown` with `error`. Series are `in_library`, without `radarr`. `poster_url` comes from the library snapshot.
+
+`POST /api/library/movies/{tmdb_id}/search` gets a movie you own but don't have on disk. The quality profile is chosen per title, like an add; the UI shows the movie's current Radarr profile in the row so the choice is visible and can be changed. Proposarr monitors the movie when needed, moves it to the chosen profile when it differs, and starts Radarr's search (`MoviesSearch`). It then follows that search exactly like the release check after an add, including `if_nothing_fits` with `switch`: once, only to a lower-ranked profile in `radarr.profile_order`. Grabs already in the movie's history before the search don't count as new. The outcome is stored per movie (`search`, the latest one only) and survives a restart the same way: a check that was still `checking` becomes `searching`.
 
 ## Collection
 
@@ -232,3 +267,4 @@ interface Settings {
 | `run.progress` | `{run_id, kind, message}` |
 | `run.finished` | `Run` (final status) |
 | `pick.updated` | `Pick` (after a verdict or request, and when a release check finishes) |
+| `owned.updated` | `OwnedTitle` (when a search for an owned movie starts and when its release check finishes) |

@@ -280,6 +280,9 @@ func TestRunHappyPath(t *testing.T) {
 	if o.MCPConfigPath != "" || len(o.AllowedTools) != 0 || !strings.Contains(o.JSONSchema, `"maxItems":3`) {
 		t.Errorf("options = %+v", o)
 	}
+	if run.Owned == nil || len(run.Owned) != 0 || strings.Contains(o.JSONSchema, "owned") || strings.Contains(o.Prompt, "owned lists") {
+		t.Errorf("a taste run has owned %v, schema %s", run.Owned, o.JSONSchema)
+	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("run dir %q not removed: %v", dir, err)
 	}
@@ -522,6 +525,103 @@ func TestRunOpenSearch(t *testing.T) {
 	if !strings.Contains(o.SystemPrompt, "You are a movie search assistant") || !strings.Contains(o.JSONSchema, `"maxItems":8`) {
 		t.Errorf("system %q schema %s", o.SystemPrompt, o.JSONSchema)
 	}
+	// Interstellar was suggested but is owned; Alien is only excluded by a verdict and Primer has no TMDB id.
+	if len(run.Owned) != 1 || run.Owned[0] != (OwnedMatch{TMDBID: 157336, Title: "Interstellar", Year: 2014}) {
+		t.Errorf("owned = %+v", run.Owned)
+	}
+	if !strings.Contains(o.Prompt, `owned lists the titles from "Titles I already have" that match the request`) || !strings.Contains(o.JSONSchema, `"required":["picks","owned"]`) {
+		t.Errorf("prompt or schema does not ask for owned matches:\n%s\n%s", o.Prompt, o.JSONSchema)
+	}
+}
+
+func TestRunOpenSearchOwned(t *testing.T) {
+	lib := fakeLib{titles: []media.Title{
+		{TMDBID: 9799, Title: "The Fast and the Furious", Year: 2001},
+		{TMDBID: 584, Title: "2 Fast 2 Furious", Year: 2003},
+		{TMDBID: 9615, Title: "The Fast and the Furious: Tokyo Drift", Year: 2006},
+		{TMDBID: 13804, Title: "Fast & Furious", Year: 2009},
+		{TMDBID: 12, Title: "Finding Nemo", Year: 2003},
+		{Title: "Fast Untracked", Year: 2010},
+	}}
+	meta := &fakeMeta{
+		details: map[int]tmdb.Details{51497: det(51497, "Fast Five", 2011), 13804: det(13804, "Fast & Furious", 2009), 384018: det(384018, "Hobbs & Shaw", 2019)},
+		search: map[string][]tmdb.Item{
+			media.NormTitle("Fast & Furious"): {item(13804, "Fast & Furious", 2009)},
+			media.NormTitle("Fast Five"):      {item(51497, "Fast Five", 2011)},
+			media.NormTitle("Hobbs & Shaw"):   {item(384018, "Hobbs & Shaw", 2019)},
+		},
+	}
+	out, err := json.Marshal(map[string]any{
+		"picks": []map[string]any{
+			pk(0, "Fast & Furious", 2009, 95, "free"), // owned, but not named in owned
+			pk(0, "Fast Five", 2011, 95, "free"),
+			pk(0, "Hobbs & Shaw", 2019, 90, "free"), // excluded by a verdict, not owned
+			pk(584, "2 Fast 2 Furious", 2003, 90, "free"),
+		},
+		"owned": []map[string]any{
+			{"title": "The Fast and the Furious", "year": 2002}, // a year off
+			{"title": "2 Fast 2 Furious", "year": 0},            // unknown year
+			{"title": "Tokyo Drift", "year": 2006},              // not how the library spells it
+			{"title": "Fast and Furious", "year": 2012},         // too far off
+			{"title": "the fast & the furious", "year": 2001},   // a duplicate
+			{"title": "Fast Untracked", "year": 2010},           // no TMDB id
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta.details[584] = det(584, "2 Fast 2 Furious", 2003)
+	fake := &agent.Fake{Result: agent.Result{Structured: out}}
+	p := New(Deps{Library: lib, Meta: meta, Agent: fake, Exclusions: fakeExclusions{384018: true}})
+	run, err := p.Run(context.Background(), Request{Kind: media.Movies, OpenSearch: true, Vibe: "fast and the furious movies", Picks: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []OwnedMatch{
+		{TMDBID: 9799, Title: "The Fast and the Furious", Year: 2001},
+		{TMDBID: 584, Title: "2 Fast 2 Furious", Year: 2003},
+		{TMDBID: 13804, Title: "Fast & Furious", Year: 2009},
+	}
+	if fmt.Sprint(run.Owned) != fmt.Sprint(want) {
+		t.Errorf("owned = %+v\nwant    %+v", run.Owned, want)
+	}
+	if len(run.Picks) != 1 || run.Picks[0].TMDBID != 51497 {
+		t.Errorf("picks = %+v, rejected %+v", run.Picks, run.Rejected)
+	}
+}
+
+func TestOwnedMatches(t *testing.T) {
+	var lib []media.Title
+	var named []rawOwned
+	for i := 1; i <= 60; i++ {
+		title := fmt.Sprintf("Title %d", i)
+		lib = append(lib, media.Title{TMDBID: i, Title: title, Year: 2000})
+		named = append(named, rawOwned{Title: title, Year: 2000})
+	}
+	if got := ownedMatches(named, lib, nil); len(got) != maxOwned || got[0].TMDBID != 1 || got[maxOwned-1].TMDBID != maxOwned {
+		t.Errorf("capped owned = %d entries, first %+v", len(got), got[0])
+	}
+
+	lib = []media.Title{
+		{TMDBID: 1, Title: "Solaris", Year: 1972},
+		{TMDBID: 2, Title: "Solaris", Year: 2002},
+		{TMDBID: 3, Title: "Unknown Year"},
+		{TMDBID: 4, Title: "Rejected Twice", Year: 1999},
+	}
+	named = []rawOwned{{Title: "Solaris", Year: 2002}, {Title: "Solaris", Year: 1973}, {Title: "Unknown Year", Year: 1980}, {Title: ""}}
+	rejected := []Rejected{
+		{TMDBID: 4, Title: "Rejected Twice", Reason: reasonExcluded},
+		{TMDBID: 4, Title: "Rejected Twice", Reason: reasonExcluded},
+		{TMDBID: 2, Title: "Solaris", Reason: "over pick count"},
+		{TMDBID: 99, Title: "Watched", Reason: reasonExcluded},
+	}
+	got := ownedMatches(named, lib, rejected)
+	if fmt.Sprint(got) != fmt.Sprint([]OwnedMatch{{2, "Solaris", 2002}, {1, "Solaris", 1972}, {3, "Unknown Year", 0}, {4, "Rejected Twice", 1999}}) {
+		t.Errorf("owned = %+v", got)
+	}
+	if got := ownedMatches(nil, nil, nil); got == nil {
+		t.Error("owned must be an empty list, not nil")
+	}
 }
 
 func TestRunOpenSearchNeedsVibe(t *testing.T) {
@@ -656,25 +756,37 @@ func TestUserPrompt(t *testing.T) {
 }
 
 func TestPickSchema(t *testing.T) {
-	s, err := pickSchema(7)
-	if err != nil {
-		t.Fatal(err)
+	type list struct {
+		MaxItems int `json:"maxItems"`
+		Items    struct {
+			Required []string `json:"required"`
+		} `json:"items"`
 	}
 	var v struct {
+		Required   []string `json:"required"`
 		Properties struct {
-			Picks struct {
-				MaxItems int `json:"maxItems"`
-				Items    struct {
-					Required []string `json:"required"`
-				} `json:"items"`
-			} `json:"picks"`
+			Picks list  `json:"picks"`
+			Owned *list `json:"owned"`
 		} `json:"properties"`
 	}
-	if err := json.Unmarshal([]byte(s), &v); err != nil {
-		t.Fatal(err)
-	}
-	if v.Properties.Picks.MaxItems != 7 || len(v.Properties.Picks.Items.Required) != 7 {
-		t.Errorf("schema = %s", s)
+	for _, owned := range []bool{false, true} {
+		s, err := pickSchema(7, owned)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v.Properties.Owned = nil
+		if err := json.Unmarshal([]byte(s), &v); err != nil {
+			t.Fatal(err)
+		}
+		if v.Properties.Picks.MaxItems != 7 || len(v.Properties.Picks.Items.Required) != 7 {
+			t.Errorf("schema = %s", s)
+		}
+		if !owned && (v.Properties.Owned != nil || len(v.Required) != 1) {
+			t.Errorf("taste schema has owned: %s", s)
+		}
+		if owned && (v.Properties.Owned == nil || v.Properties.Owned.MaxItems != 50 || fmt.Sprint(v.Properties.Owned.Items.Required) != "[title year]" || fmt.Sprint(v.Required) != "[picks owned]") {
+			t.Errorf("search schema = %s", s)
+		}
 	}
 }
 

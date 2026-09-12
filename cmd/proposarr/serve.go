@@ -139,6 +139,13 @@ func serverOptions(rt *runtime, st store.Store, log *slog.Logger) web.Options {
 		Library: func(ctx context.Context, kind media.Kind) ([]media.Title, error) {
 			return rt.state().deps.library(false).Titles(ctx, kind)
 		},
+		Radarr: func() web.RadarrLibrary {
+			// Only a configured client: a nil *arr.Radarr would not be a nil interface.
+			if r := rt.state().deps.radarr; r != nil {
+				return r
+			}
+			return nil
+		},
 		Check: func(ctx context.Context) []web.CheckResult {
 			s := rt.state()
 			return runChecks(ctx, s.cfg, s.deps)
@@ -177,4 +184,8 @@ func (a webAdder) Add(ctx context.Context, item request.Item, ch request.Chooser
 
 func (a webAdder) SwitchProfile(ctx context.Context, item request.Item, movieID, profileID int) (request.Result, error) {
 	return a.rt.state().deps.requester().SwitchProfile(ctx, item, movieID, profileID)
+}
+
+func (a webAdder) SearchExisting(ctx context.Context, tmdbID, profileID int, fallback request.Fallback) (request.Result, error) {
+	return a.rt.state().deps.requester().SearchExisting(ctx, tmdbID, profileID, fallback)
 }

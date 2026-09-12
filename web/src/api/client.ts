@@ -6,6 +6,7 @@ import type {
   IfNothingFits,
   Kind,
   Library,
+  OwnedTitle,
   Pick,
   Run,
   Service,
@@ -147,6 +148,9 @@ export const api = {
     }),
   switchProfile: (id: number, qualityProfileId: number) =>
     request<Pick>("POST", `/api/picks/${id}/request/profile`, { quality_profile_id: qualityProfileId }),
+  owned: (runId: number) => request<OwnedTitle[] | null>("GET", `/api/runs/${runId}/owned`),
+  searchOwnedMovie: (tmdbId: number, qualityProfileId: number, ifNothingFits?: IfNothingFits) =>
+    request<OwnedTitle>("POST", `/api/library/movies/${tmdbId}/search`, { quality_profile_id: qualityProfileId, if_nothing_fits: ifNothingFits }),
   library: (kind: Kind) => request<Library>("GET", `/api/library?kind=${kind}`),
   settings: () => request<Settings>("GET", "/api/settings"),
   saveSettings: (values: SettingValues) => request<Settings>("PUT", "/api/settings", { values }),

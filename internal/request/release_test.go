@@ -28,12 +28,15 @@ type fakeSearcher struct {
 	movieErr    error
 	setErr      error
 	searchErr   error
+	monitorErr  error
 
 	cmdID, polls int
 	applied      bool
 	interactive  int
 	switched     []int
 	searched     []int
+	monitored    []bool
+	calls        []string // grabs, monitor, profile and search, in order
 }
 
 func newSearcher() *fakeSearcher {
@@ -60,6 +63,15 @@ func (f *fakeSearcher) poll() arr.Command {
 }
 
 func (f *fakeSearcher) Movie(context.Context, int) (arr.Movie, error) { return f.movie, f.movieErr }
+func (f *fakeSearcher) MovieByTMDB(_ context.Context, tmdbID int) (arr.Movie, error) {
+	switch {
+	case f.movieErr != nil:
+		return arr.Movie{}, f.movieErr
+	case tmdbID != f.movie.TMDBID:
+		return arr.Movie{}, arr.ErrNotFound
+	}
+	return f.movie, nil
+}
 func (f *fakeSearcher) MovieSearches(context.Context, int) ([]arr.Command, error) {
 	return []arr.Command{f.poll()}, nil
 }
@@ -70,6 +82,7 @@ func (f *fakeSearcher) Command(_ context.Context, id int) (arr.Command, error) {
 	return f.poll(), nil
 }
 func (f *fakeSearcher) SearchMovie(_ context.Context, id int) (arr.Command, error) {
+	f.calls = append(f.calls, "search")
 	if f.searchErr != nil {
 		return arr.Command{}, f.searchErr
 	}
@@ -77,18 +90,31 @@ func (f *fakeSearcher) SearchMovie(_ context.Context, id int) (arr.Command, erro
 	f.cmdID, f.polls, f.applied = f.cmdID+1, 0, false
 	return arr.Command{ID: f.cmdID, Name: "MoviesSearch", Status: "queued"}, nil
 }
-func (f *fakeSearcher) Grabs(context.Context, int) ([]arr.Grab, error)   { return f.history, nil }
+func (f *fakeSearcher) Grabs(context.Context, int) ([]arr.Grab, error) {
+	f.calls = append(f.calls, "grabs")
+	return f.history, nil
+}
 func (f *fakeSearcher) Pending(context.Context, int) ([]arr.Grab, error) { return f.pending, nil }
 func (f *fakeSearcher) Releases(context.Context, int) ([]arr.Release, error) {
 	f.interactive++
 	return f.releases, nil
 }
 func (f *fakeSearcher) SetQualityProfile(_ context.Context, _, profileID int) error {
+	f.calls = append(f.calls, "profile")
 	if f.setErr != nil {
 		return f.setErr
 	}
 	f.switched = append(f.switched, profileID)
-	f.profileID = profileID
+	f.profileID, f.movie.QualityProfileID = profileID, profileID
+	return nil
+}
+func (f *fakeSearcher) SetMonitored(_ context.Context, _ int, monitored bool) error {
+	f.calls = append(f.calls, "monitor")
+	if f.monitorErr != nil {
+		return f.monitorErr
+	}
+	f.monitored = append(f.monitored, monitored)
+	f.movie.Monitored = monitored
 	return nil
 }
 
@@ -429,6 +455,147 @@ func TestSwitchProfile(t *testing.T) {
 			}
 			if len(s.switched) != 0 || len(s.searched) != 0 {
 				t.Errorf("switched %v, searched %v after an error", s.switched, s.searched)
+			}
+		})
+	}
+}
+
+func TestSearchExisting(t *testing.T) {
+	fastPolling(t)
+	ctx := context.Background()
+	older := arr.Grab{Title: "Children of Men 2006 720p HDTV", Quality: "HDTV-720p"}
+	requester := func(s *fakeSearcher) *Requester {
+		target := movieTarget()
+		target.profiles = radarrProfiles
+		return &Requester{Radarr: target, RadarrSearch: s, ProfileOrder: ranking}
+	}
+	// owned is Children of Men in Radarr on "Remux + WEB 2160p": unmonitored, without a file, grabbed once before.
+	owned := func() *fakeSearcher {
+		s := newSearcher()
+		s.movie.QualityProfileID, s.profileID, s.history = 7, 7, []arr.Grab{older}
+		return s
+	}
+
+	t.Run("unmonitored gets monitored", func(t *testing.T) {
+		s := owned()
+		s.grabOn[7] = framestorGrab
+		res, err := requester(s).SearchExisting(ctx, 9693, 7, FallbackWait)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.App != "Radarr" || res.ID != 42 || res.Title != "Children of Men" || res.QualityProfile != "Remux + WEB 2160p" || res.Follow == nil {
+			t.Fatalf("result = %+v", res)
+		}
+		// The history is read before the movie changes.
+		if !slices.Equal(s.monitored, []bool{true}) || len(s.switched) != 0 || !slices.Equal(s.calls, []string{"grabs", "monitor", "search"}) {
+			t.Errorf("monitored %v, switched %v, calls %v", s.monitored, s.switched, s.calls)
+		}
+		if c := res.Follow(ctx); c.Status != CheckGrabbed || c.Release == nil || c.Release.Title != framestorGrab.Title || c.Profile != "Remux + WEB 2160p" || c.SwitchedFrom != "" {
+			t.Errorf("check = %+v", c)
+		}
+	})
+
+	t.Run("profile change", func(t *testing.T) {
+		s := owned()
+		s.movie.Monitored = true
+		s.grabOn[8] = framestorGrab
+		res, err := requester(s).SearchExisting(ctx, 9693, 8, FallbackWait)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.QualityProfile != "Remux + WEB 1080p" || len(s.monitored) != 0 || !slices.Equal(s.switched, []int{8}) || !slices.Equal(s.calls, []string{"grabs", "profile", "search"}) {
+			t.Errorf("result %+v, monitored %v, switched %v, calls %v", res, s.monitored, s.switched, s.calls)
+		}
+		if c := res.Follow(ctx); c.Status != CheckGrabbed || c.Profile != "Remux + WEB 1080p" {
+			t.Errorf("check = %+v", c)
+		}
+	})
+
+	t.Run("an older grab is not new", func(t *testing.T) {
+		s := owned()
+		s.movie.Monitored = true
+		s.releases = childrenOfMen()
+		res, err := requester(s).SearchExisting(ctx, 9693, 7, FallbackWait)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := res.Follow(ctx); c.Status != CheckWaiting || len(c.Alternatives) != 2 || len(s.switched) != 0 || !slices.Equal(s.searched, []int{42}) {
+			t.Errorf("check = %+v, switched %v, searched %v", c, s.switched, s.searched)
+		}
+	})
+
+	t.Run("switches when nothing fits", func(t *testing.T) {
+		s := owned()
+		s.releases = childrenOfMen()
+		s.grabOn[8] = framestorGrab
+		res, err := requester(s).SearchExisting(ctx, 9693, 7, FallbackSwitch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := res.Follow(ctx)
+		if c.Status != CheckGrabbed || c.SwitchedFrom != "Remux + WEB 2160p" || c.Profile != "Remux + WEB 1080p" || c.Release == nil || c.Release.Title != framestorGrab.Title {
+			t.Fatalf("check = %+v", c)
+		}
+		if !slices.Equal(s.switched, []int{8}) || !slices.Equal(s.searched, []int{42, 42}) || s.interactive != 1 {
+			t.Errorf("switched %v, searched %v, interactive %d", s.switched, s.searched, s.interactive)
+		}
+	})
+
+	t.Run("switches only once", func(t *testing.T) {
+		s := owned()
+		s.releases = childrenOfMen()
+		res, err := requester(s).SearchExisting(ctx, 9693, 7, FallbackSwitch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := res.Follow(ctx); c.Status != CheckWaiting || c.SwitchedFrom != "Remux + WEB 2160p" || !slices.Equal(s.switched, []int{8}) || s.interactive != 2 {
+			t.Errorf("check = %+v, switched %v, interactive %d", c, s.switched, s.interactive)
+		}
+	})
+
+	t.Run("search not started", func(t *testing.T) {
+		s := owned()
+		s.searchErr = errors.New("radarr: HTTP 503")
+		res, err := requester(s).SearchExisting(ctx, 9693, 8, FallbackSwitch)
+		if err != nil || !slices.Equal(s.monitored, []bool{true}) || !slices.Equal(s.switched, []int{8}) {
+			t.Fatalf("a search that did not start must still report the changes: %v, monitored %v, switched %v", err, s.monitored, s.switched)
+		}
+		if c := res.Follow(ctx); c.Status != CheckFailed || c.Profile != "Remux + WEB 1080p" || !strings.Contains(c.Error, "start Radarr's search") {
+			t.Errorf("check = %+v", c)
+		}
+	})
+
+	cases := []struct {
+		name    string
+		tmdbID  int
+		setup   func(s *fakeSearcher)
+		profile int
+		want    error
+		noSrc   bool
+	}{
+		{name: "has a file", tmdbID: 9693, setup: func(s *fakeSearcher) { s.movie.HasFile = true }, profile: 7, want: ErrHasFile},
+		{name: "not in Radarr", tmdbID: 603, profile: 7, want: ErrNotInLibrary},
+		{name: "unknown profile", tmdbID: 9693, profile: 99, want: ErrUnknownProfile},
+		{name: "no searcher", tmdbID: 9693, profile: 7, want: ErrNotConfigured, noSrc: true},
+		{name: "Radarr down", tmdbID: 9693, setup: func(s *fakeSearcher) { s.movieErr = errors.New("radarr: HTTP 500") }, profile: 7},
+		{name: "not monitored", tmdbID: 9693, setup: func(s *fakeSearcher) { s.monitorErr = errors.New("radarr: HTTP 500") }, profile: 8},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := owned()
+			if tc.setup != nil {
+				tc.setup(s)
+			}
+			r := requester(s)
+			if tc.noSrc {
+				r.RadarrSearch = nil
+			}
+			res, err := r.SearchExisting(ctx, tc.tmdbID, tc.profile, FallbackSwitch)
+			if err == nil || (tc.want != nil && !errors.Is(err, tc.want)) || res.Follow != nil {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if len(s.monitored) != 0 || len(s.switched) != 0 || len(s.searched) != 0 {
+				t.Errorf("monitored %v, switched %v, searched %v after an error", s.monitored, s.switched, s.searched)
 			}
 		})
 	}

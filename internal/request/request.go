@@ -16,6 +16,7 @@ import (
 var (
 	ErrAlreadyInLibrary = errors.New("already in library")
 	ErrNotInLibrary     = errors.New("not in library")
+	ErrHasFile          = errors.New("already has a file")
 	ErrNotConfigured    = errors.New("not configured")
 	ErrUnknownProfile   = errors.New("unknown quality profile")
 	ErrCancelled        = errors.New("cancelled")

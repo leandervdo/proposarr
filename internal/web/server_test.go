@@ -31,12 +31,19 @@ type fakeStore struct {
 	runs       map[int64]store.Run
 	picks      map[int64]store.Pick
 	requests   []store.Request
+	searches   map[int]store.LibrarySearch // movies, by TMDB id
 	profile    *profile.Profile
 	lastFilter store.PickFilter
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{runs: map[int64]store.Run{}, picks: map[int64]store.Pick{}}
+	return &fakeStore{runs: map[int64]store.Run{}, picks: map[int64]store.Pick{}, searches: map[int]store.LibrarySearch{}}
+}
+
+func (f *fakeStore) addRun(r store.Run) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.runs[r.ID] = r
 }
 
 func (f *fakeStore) addPick(p store.Pick) {
@@ -65,7 +72,7 @@ func (f *fakeStore) FinishRun(_ context.Context, id int64, run *pipeline.Run, ru
 		r.Status, r.Error = store.RunFailed, runErr.Error()
 	}
 	if run != nil {
-		r.PickCount = len(run.Picks)
+		r.PickCount, r.Owned = len(run.Picks), run.Owned
 		for _, p := range run.Picks {
 			f.nextID++
 			f.picks[f.nextID] = store.Pick{ID: f.nextID, RunID: id, Pick: p}
@@ -189,6 +196,37 @@ func (f *fakeStore) UpdateRequestRelease(_ context.Context, pickID int64, qualit
 	return store.ErrNotFound
 }
 
+func (f *fakeStore) RecordLibrarySearch(_ context.Context, s store.LibrarySearch) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.searches[s.TMDBID] = s
+	return nil
+}
+
+func (f *fakeStore) UpdateLibrarySearch(_ context.Context, _ media.Kind, tmdbID int, qualityProfile string, release json.RawMessage) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s, ok := f.searches[tmdbID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	s.QualityProfile, s.Release = qualityProfile, release
+	f.searches[tmdbID] = s
+	return nil
+}
+
+func (f *fakeStore) LibrarySearches(_ context.Context, _ media.Kind, tmdbIDs []int) (map[int]store.LibrarySearch, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[int]store.LibrarySearch{}
+	for _, id := range tmdbIDs {
+		if s, ok := f.searches[id]; ok {
+			out[id] = s
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeStore) Excluded(context.Context, media.Kind) (map[int]bool, error) { return nil, nil }
 func (f *fakeStore) Close() error                                               { return nil }
 
@@ -233,6 +271,24 @@ type fakeAdder struct {
 	fallback  request.Fallback
 	switched  [][2]int // movie id, profile id
 	switchErr error
+	searched  [][2]int // TMDB id, profile id
+	searchErr error
+}
+
+func (a *fakeAdder) SearchExisting(_ context.Context, tmdbID, profileID int, fallback request.Fallback) (request.Result, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.searched = append(a.searched, [2]int{tmdbID, profileID})
+	if a.searchErr != nil {
+		return request.Result{}, a.searchErr
+	}
+	a.fallback = fallback
+	for _, p := range a.catalog.profiles {
+		if p.ID == profileID {
+			return request.Result{App: "Radarr", ID: 250, Title: "Children of Men", QualityProfile: p.Name, Follow: a.follow()}, nil
+		}
+	}
+	return request.Result{}, fmt.Errorf("Radarr quality profile %d: %w", profileID, request.ErrUnknownProfile)
 }
 
 // follow returns a Follow reporting release, under a.mu.

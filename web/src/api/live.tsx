@@ -1,9 +1,9 @@
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { settleRelease } from "@/lib/releases";
+import { settleOwnedRelease, settleRelease } from "@/lib/releases";
 import { subscribe } from "./events";
-import { applyPick, keys } from "./queries";
-import type { Kind, Pick, Run } from "./types";
+import { applyOwned, applyPick, keys } from "./queries";
+import type { Kind, OwnedTitle, Pick, Run } from "./types";
 
 interface LiveRun {
   runId: number;
@@ -59,9 +59,16 @@ export function LiveProvider({ children }: { children: ReactNode }) {
             void qc.invalidateQueries({ queryKey: ["picks"] });
             void qc.invalidateQueries({ queryKey: ["library"] });
             break;
-          case "pick.updated":
-            queuePickEvent(qc, e.data);
+          case "pick.updated": {
+            const pick = e.data;
+            queueEvent(() => applyPickEvent(qc, pick));
             break;
+          }
+          case "owned.updated": {
+            const title = e.data;
+            queueEvent(() => applyOwnedEvent(qc, title));
+            break;
+          }
         }
       }, setConnected),
     [qc],
@@ -73,11 +80,11 @@ export function LiveProvider({ children }: { children: ReactNode }) {
 
 export const useLive = () => useContext(LiveContext);
 
-/** pick.updated events are applied one after another, so a later event never lands before an earlier one. */
-let pickEvents = Promise.resolve();
+/** pick.updated and owned.updated events are applied one after another, so a later event never lands before an earlier one. */
+let cacheEvents = Promise.resolve();
 
-function queuePickEvent(qc: QueryClient, pick: Pick) {
-  pickEvents = pickEvents.then(() => applyPickEvent(qc, pick)).catch(() => {});
+function queueEvent(apply: () => Promise<void>) {
+  cacheEvents = cacheEvents.then(apply).catch(() => {});
 }
 
 /**
@@ -92,4 +99,13 @@ async function applyPickEvent(qc: QueryClient, pick: Pick) {
   applyPick(qc, pick);
   settleRelease(pick);
   if (inFlight) void qc.invalidateQueries({ queryKey: ["picks"] });
+}
+
+/** Writes an owned.updated event into every cached owned list, guarding against in-flight refetches like applyPickEvent. */
+async function applyOwnedEvent(qc: QueryClient, title: OwnedTitle) {
+  const inFlight = qc.isFetching({ queryKey: ["owned"] }) > 0;
+  await qc.cancelQueries({ queryKey: ["owned"] });
+  applyOwned(qc, title);
+  settleOwnedRelease(title);
+  if (inFlight) void qc.invalidateQueries({ queryKey: ["owned"] });
 }

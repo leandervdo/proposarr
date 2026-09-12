@@ -14,8 +14,11 @@ import type {
   Kind,
   Library,
   LibraryTitle,
+  OwnedMatch,
+  OwnedTitle,
   Pick,
   Profile,
+  RadarrMovieState,
   ReleaseCheck,
   ReleaseInfo,
   Run,
@@ -313,7 +316,7 @@ function makeRun(kind: Kind, over: Partial<Run>): Run {
     started_at: ago(60), finished_at: ago(58), cost_usd: 0.1842, input_tokens: 48_210, output_tokens: 3_904,
     num_turns: 2, session_id: "a3f1c2d4-5b6e-4f70-8a91-b2c3d4e5f607", library_count: kind === "movies" ? 185 : 24,
     history_count: kind === "movies" ? 61 : 14, candidate_count: kind === "movies" ? 150 : 96, pick_count: 0,
-    warnings: [], rejected: [], ...over,
+    warnings: [], rejected: [], owned: [], ...over,
   };
 }
 
@@ -396,7 +399,7 @@ if (scenario === "default" || scenario === "many") {
   });
   addPicks(r4, seriesPicks);
   const search = makeRun("movies", {
-    use_taste: false, vibe: "90s heist movies with a twist ending", started_at: ago(60 * 3), finished_at: ago(60 * 3 - 2),
+    use_taste: false, vibe: "heist movies with a twist ending", started_at: ago(60 * 3), finished_at: ago(60 * 3 - 2),
     cost_usd: 0.0934, input_tokens: 14_380, output_tokens: 2_915, history_count: 0, candidate_count: 0,
     rejected: [
       { tmdb_id: 949, title: "Heat", reason: "already in library or watch history" },
@@ -467,7 +470,10 @@ function startMockRun(kind: Kind, vibe: string, totalMs = 14_000, useTaste = tru
     }, stepMs * i + 300),
   );
   setTimeout(() => {
-    Object.assign(run, { status: "succeeded", finished_at: new Date().toISOString(), cost_usd: 0.1733, input_tokens: 45_120, output_tokens: 3_610, num_turns: 2 });
+    Object.assign(run, {
+      status: "succeeded", finished_at: new Date().toISOString(), cost_usd: 0.1733, input_tokens: 45_120, output_tokens: 3_610, num_turns: 2,
+      owned: useTaste ? [] : mockOwnedMatches(kind),
+    });
     const seeds = useTaste
       ? (kind === "series" ? seriesPicks : moviePicks).map((p) => ({ ...p, verdict: undefined, verdict_at: undefined, later_until: undefined, request: undefined, score: Math.max(60, p.score - Math.round(Math.random() * 6)) }))
       : searchPicks(kind);
@@ -733,9 +739,9 @@ const options: Record<"radarr" | "sonarr", AppOptions> = {
   },
 };
 
-/** Radarr's search after adding, with releases from a real search for Children of Men (2006) renamed to the pick. 2160p profiles find nothing that fits. */
-function releaseCheck(pick: Pick, profile: string, ifNothingFits: IfNothingFits): ReleaseCheck {
-  const name = `${pick.title.replace(/[^\p{L}\p{N}]+/gu, " ").trim()} ${pick.year ?? ""}`.trim();
+/** Radarr's search after adding, with releases from a real search for Children of Men (2006) renamed to the movie. 2160p profiles find nothing that fits. */
+function releaseCheck(movie: { title: string; year?: number }, profile: string, ifNothingFits: IfNothingFits): ReleaseCheck {
+  const name = `${movie.title.replace(/[^\p{L}\p{N}]+/gu, " ").trim()} ${movie.year ?? ""}`.trim();
   const remux: ReleaseInfo = {
     title: `${name} BluRay 1080p DTS-HD MA 5 1 AVC REMUX-FraMeSToR`, quality: "Remux-1080p", size: 32.4e9,
     indexer: "TorrentLeech (Prowlarr)", protocol: "torrent", seeders: 249,
@@ -815,7 +821,7 @@ function titleDetails(kind: Kind, tmdbId: number): TitleDetails {
 
 export async function mockFetch(method: string, path: string, body?: unknown): Promise<{ data: unknown; headers: Headers }> {
   const headers = new Headers();
-  const data = (await mockBulkAddRoute(method, path, body)) ?? (await route(method, path, body, headers));
+  const data = (await mockBulkAddRoute(method, path, body)) ?? (await mockOwnedRoute(method, path, body)) ?? (await route(method, path, body, headers));
   return { data, headers };
 }
 
@@ -1072,3 +1078,165 @@ function mockBulkOutcome(pick: Pick, profile: string, ifNothingFits: IfNothingFi
   return { ...releaseCheck(pick, first.name, "wait"), switched_from: profile };
 }
 // ---------- end of bulk add (multi-select) ----------
+
+// ---------- owned matches (open search) ----------
+// Library titles that match an open search, with their live Radarr state, so the Picks page shows every kind of
+// card: downloaded, downloading, on hold, missing, not monitored, not released yet and unreadable, plus an earlier search
+// that is still waiting for a release. mockFetch asks mockOwnedRoute after mockBulkAddRoute; it only answers
+// GET /api/runs/{id}/owned, POST /api/library/movies/{tmdb_id}/search and the title details of owned movies without
+// a TMDB seed, and everything else goes through route() as before.
+
+/** Radarr's side of an owned movie. */
+function ownedRadarr(id: number, profileId: number, over: Partial<RadarrMovieState> = {}): RadarrMovieState {
+  const profile = options.radarr.quality_profiles.find((p) => p.id === profileId)!;
+  return { id, monitored: true, has_file: false, available: true, quality_profile_id: profile.id, quality_profile: profile.name, ...over };
+}
+
+function ownedMovie(tmdbId: number, title: string, year: number, poster: string | undefined, over: Partial<OwnedTitle>): OwnedTitle {
+  return { tmdb_id: tmdbId, kind: "movies", title, year, poster_url: poster ? `${IMG}${poster}` : undefined, status: "missing", ...over };
+}
+
+/** The heist search's matches in Claude's order, then Heat, dropped from the picks because you own it. */
+const ownedMovies: OwnedTitle[] = [
+  ownedMovie(161, "Ocean's Eleven", 2001, "/hQQCdZrsHtZyR6NbKH2YyCqd2fR.jpg", {
+    status: "downloaded", radarr: ownedRadarr(31, 6, { has_file: true, file_quality: "Bluray-1080p", size_on_disk: 14.2e9 }),
+  }),
+  // Grabbed, and held in the queue for a delay profile: no progress.
+  ownedMovie(163, "Ocean's Twelve", 2004, "/wi8ghEKiPFT8cDdu1otuh1IO9iT.jpg", {
+    status: "downloading", radarr: ownedRadarr(32, 6, { queue: { status: "delay", quality: "Remux-1080p", title: "Oceans Twelve 2004 BluRay 1080p REMUX AVC DTS-HD MA 5 1" } }),
+  }),
+  // Searched with a 2160p profile yesterday, and nothing fit.
+  ownedMovie(298, "Ocean's Thirteen", 2007, "/pBsZs4zYUiUTemqbikTZ76iQRaU.jpg", {
+    radarr: ownedRadarr(33, 7),
+    search: {
+      quality_profile: "Remux + WEB 2160p", requested_at: ago(60 * 20),
+      release: releaseCheck({ title: "Ocean's Thirteen", year: 2007 }, "Remux + WEB 2160p", "wait"),
+    },
+  }),
+  ownedMovie(402900, "Ocean's Eight", 2018, "/MvYpKlpFukTivnlBhizGbkAe3v.jpg", {
+    status: "downloading",
+    radarr: ownedRadarr(34, 7, { queue: { status: "downloading", progress: 45, quality: "WEBDL-2160p", title: "Oceans Eight 2018 2160p WEB-DL DDP5 1 Atmos HDR H 265" } }),
+  }),
+  ownedMovie(75656, "Now You See Me", 2013, "/tWsNYbrqy1p1w6K9zRk0mSchztT.jpg", { radarr: ownedRadarr(35, 4) }),
+  ownedMovie(291805, "Now You See Me 2", 2016, "/A81kDB6a1K86YLlcOtZB27jriJh.jpg", { status: "unmonitored", radarr: ownedRadarr(36, 6, { monitored: false }) }),
+  ownedMovie(425274, "Now You See Me: Now You Don't", 2025, "/pVj5KSyxO5nwQIyZ6Jtas05ajM4.jpg", { status: "unreleased", radarr: ownedRadarr(37, 6, { available: false }) }),
+  ownedMovie(9654, "The Italian Job", 2003, "/eSkjK4kctyrWpFhxl35GPvSs6tI.jpg", { radarr: ownedRadarr(38, 5) }),
+  ownedMovie(388, "Inside Man", 2006, "/ffMUgkDZICNiyaws1Jkv8qG8uFW.jpg", {
+    status: "unknown", radarr: ownedRadarr(39, 6), error: "read Radarr's queue: GET /api/v3/queue: context deadline exceeded",
+  }),
+  // No poster in the library snapshot, like its library entry.
+  ownedMovie(949, "Heat", 1995, undefined, {
+    status: "downloaded", radarr: ownedRadarr(12, 7, { has_file: true, file_quality: "Bluray-2160p", size_on_disk: 58.3e9 }),
+  }),
+];
+
+const ownedSeries: OwnedTitle[] = [
+  { tmdb_id: 96648, kind: "series", title: "Sweet Home", year: 2020, poster_url: `${IMG}/zcugNxDg59YwIf3dUHsrHmO7pc1.jpg`, status: "in_library" },
+];
+
+/** Searching answers 404 and the movie turns unknown: it was removed from Radarr after the page loaded. */
+const MOCK_OWNED_GONE = new Set([9654 /* The Italian Job */]);
+/** Radarr is still searching when Proposarr stops waiting. */
+const MOCK_OWNED_STILL_SEARCHING = new Set([291805 /* Now You See Me 2 */]);
+
+// The owned titles are in the library too.
+for (const t of ownedMovies) {
+  if (!libraryMovies.some((m) => m.tmdb_id === t.tmdb_id)) {
+    libraryMovies.push({ title: t.title, year: t.year, tmdb_id: t.tmdb_id, genres: ["Crime", "Thriller"], poster_url: t.poster_url, added: ago(60 * 24 * 420) });
+  }
+}
+for (const t of ownedSeries) {
+  if (!librarySeries.some((s) => s.tmdb_id === t.tmdb_id)) {
+    librarySeries.push({ title: t.title, year: t.year, tmdb_id: t.tmdb_id, genres: seedFor("series", t.tmdb_id)?.genres, added: ago(60 * 24 * 300) });
+  }
+}
+
+/** run.owned for a mock open search: every movie search matches the movies above, every series search the series. */
+function mockOwnedMatches(kind: Kind): OwnedMatch[] {
+  return (kind === "series" ? ownedSeries : ownedMovies).map(({ tmdb_id, title, year }) => ({ tmdb_id, title, year }));
+}
+
+// The seeded heist and Korean thriller searches match titles you own; the older whodunit searches match nothing.
+for (const run of runs) {
+  if (run.vibe === "heist movies with a twist ending" || run.vibe === "short Korean thrillers") run.owned = mockOwnedMatches(run.kind);
+}
+
+function ownedTitle(kind: Kind, tmdbId: number): OwnedTitle | undefined {
+  return (kind === "series" ? ownedSeries : ownedMovies).find((t) => t.tmdb_id === tmdbId);
+}
+
+/** The owned routes above; undefined for every other request. */
+async function mockOwnedRoute(method: string, path: string, body: unknown): Promise<unknown> {
+  const { pathname } = new URL(path, "http://mock");
+  const list = /^\/api\/runs\/(\d+)\/owned$/.exec(pathname);
+  const search = /^\/api\/library\/movies\/(\d+)\/search$/.exec(pathname);
+  const details = /^\/api\/titles\/movies\/(\d+)$/.exec(pathname);
+
+  if (method === "GET" && list) {
+    // Read live from Radarr, a few at a time.
+    await wait(900);
+    if (scenario === "down") throw new ApiError(0, "Proposarr is not reachable. Check that `proposarr serve` is running.");
+    const run = runs.find((r) => r.id === Number(list[1]));
+    if (!run) throw new ApiError(404, "run not found");
+    return (run.owned ?? []).flatMap((m) => {
+      const t = ownedTitle(run.kind, m.tmdb_id);
+      return t ? [structuredClone(t)] : [];
+    });
+  }
+  if (method === "POST" && search) return searchOwnedMovie(Number(search[1]), body);
+
+  const seedless = method === "GET" && details && !seedFor("movies", Number(details[1])) ? ownedTitle("movies", Number(details[1])) : undefined;
+  if (seedless) {
+    await wait(350);
+    return {
+      tmdb_id: seedless.tmdb_id, kind: "movies", title: seedless.title, year: seedless.year, genres: ["Crime", "Thriller"],
+      poster_url: seedless.poster_url, directors: [], cast: [], streaming: [], in_library: true,
+    } satisfies TitleDetails;
+  }
+  return undefined;
+}
+
+/** Like the server: monitors the movie, moves it to the profile, and follows Radarr's search with owned.updated. */
+async function searchOwnedMovie(tmdbId: number, body: unknown): Promise<OwnedTitle> {
+  // A slightly different time per movie, so the rows of the get dialog settle one by one.
+  await wait(900 + ((tmdbId * 13) % 4) * 250);
+  if (scenario === "down") throw new ApiError(0, "Proposarr is not reachable. Check that `proposarr serve` is running.");
+  const { quality_profile_id, if_nothing_fits = "wait" } = body as { quality_profile_id?: number; if_nothing_fits?: string };
+  if (if_nothing_fits !== "switch" && if_nothing_fits !== "wait") throw new ApiError(400, "if_nothing_fits must be switch or wait");
+  const fits: IfNothingFits = if_nothing_fits;
+  const profile = options.radarr.quality_profiles.find((p) => p.id === quality_profile_id);
+  if (!profile) throw new ApiError(400, "quality_profile_id is required: choose a quality profile for this movie");
+  const movie = ownedTitle("movies", tmdbId);
+  if (movie && MOCK_OWNED_GONE.has(tmdbId)) {
+    movie.status = "unknown";
+    movie.radarr = undefined;
+    movie.search = undefined;
+    movie.error = "not in Radarr any more";
+  }
+  if (!movie?.radarr) throw new ApiError(404, `movie tmdb:${tmdbId}: not in library`);
+  if (movie.radarr.has_file) throw new ApiError(409, `${movie.title} (${movie.year}): already has a file`);
+  if (movie.search?.release.status === "checking") throw new ApiError(409, "Radarr is still searching for this movie");
+
+  movie.radarr = { ...movie.radarr, monitored: true, quality_profile_id: profile.id, quality_profile: profile.name };
+  if (movie.status === "unmonitored") movie.status = "missing";
+  movie.search = { quality_profile: profile.name, requested_at: new Date().toISOString(), release: checking(profile.name) };
+  emit({ type: "owned.updated", data: structuredClone(movie) });
+
+  setTimeout(() => {
+    const release = mockOwnedOutcome(movie, profile.name, fits);
+    // After a switch the movie stays on the profile Radarr searched with.
+    const searched = options.radarr.quality_profiles.find((p) => p.name === release.profile) ?? profile;
+    movie.radarr = { ...movie.radarr!, quality_profile_id: searched.id, quality_profile: searched.name };
+    movie.search = { ...movie.search!, quality_profile: searched.name, release };
+    emit({ type: "owned.updated", data: structuredClone(movie) });
+  }, 2500 + ((tmdbId * 7) % 4) * 700);
+  return structuredClone(movie);
+}
+
+/** Like an add: 2160p profiles find nothing that fits, so they wait or switch to Remux + WEB 1080p; the rest grab. */
+function mockOwnedOutcome(movie: OwnedTitle, profile: string, ifNothingFits: IfNothingFits): ReleaseCheck {
+  if (movie.status === "unreleased") return { status: "unavailable", profile, found: 0, qualities: [], alternatives: [] };
+  if (MOCK_OWNED_STILL_SEARCHING.has(movie.tmdb_id)) return { status: "searching", profile, found: 0, qualities: [], alternatives: [] };
+  return releaseCheck(movie, profile, ifNothingFits);
+}
+// ---------- end of owned matches (open search) ----------

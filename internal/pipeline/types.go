@@ -105,6 +105,14 @@ type Rejected struct {
 	Reason string `json:"reason"`
 }
 
+// OwnedMatch is a library title that matches an open search's description.
+// Open searches leave owned titles out of the picks, so they are named here.
+type OwnedMatch struct {
+	TMDBID int    `json:"tmdb_id"`
+	Title  string `json:"title"`
+	Year   int    `json:"year,omitempty"`
+}
+
 type Run struct {
 	Kind           media.Kind      `json:"kind"`
 	Vibe           string          `json:"vibe,omitempty"`
@@ -118,6 +126,7 @@ type Run struct {
 	CandidateCount int             `json:"candidate_count"`
 	Profile        profile.Profile `json:"profile"`
 	Picks          []Pick          `json:"picks"`
+	Owned          []OwnedMatch    `json:"owned"` // open search only
 	Rejected       []Rejected      `json:"rejected,omitempty"`
 	Warnings       []string        `json:"warnings,omitempty"`
 	CostUSD        float64         `json:"cost_usd"`

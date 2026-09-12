@@ -34,7 +34,60 @@ export interface Run {
   pick_count: number;
   warnings: string[] | null;
   rejected: Rejected[] | null;
+  /** Open search: library titles that match the description. [] otherwise; older servers omit it. */
+  owned?: OwnedMatch[] | null;
   profile?: Profile;
+}
+
+export interface OwnedMatch {
+  tmdb_id: number;
+  title: string;
+  year?: number;
+}
+
+/**
+ * Movies: the first that applies of downloaded, downloading, unreleased, unmonitored and missing; unknown when
+ * Radarr couldn't read it. Series: in_library.
+ */
+export type OwnedStatus = "downloaded" | "downloading" | "missing" | "unmonitored" | "unreleased" | "unknown" | "in_library";
+
+/** An owned match with its live state in Radarr/Sonarr (GET /api/runs/{id}/owned). */
+export interface OwnedTitle {
+  tmdb_id: number;
+  kind: Kind;
+  title: string;
+  year?: number;
+  /** From the library snapshot. */
+  poster_url?: string;
+  status: OwnedStatus;
+  /** Movies, when Radarr could be read. */
+  radarr?: RadarrMovieState;
+  /** The latest search Proposarr started for this movie. Updated through owned.updated. */
+  search?: LibrarySearch;
+  /** status unknown: why Radarr couldn't be read. */
+  error?: string;
+}
+
+export interface RadarrMovieState {
+  id: number;
+  monitored: boolean;
+  has_file: boolean;
+  available: boolean;
+  quality_profile_id: number;
+  quality_profile: string;
+  /** has_file: e.g. "Bluray-1080p" */
+  file_quality?: string;
+  /** bytes */
+  size_on_disk?: number;
+  /** In Radarr's download queue; progress 0–100. */
+  queue?: { status: string; progress?: number; quality?: string; title?: string };
+}
+
+/** A search for a movie already in Radarr (POST /api/library/movies/{tmdb_id}/search). */
+export interface LibrarySearch {
+  quality_profile: string;
+  requested_at: string;
+  release: ReleaseCheck;
 }
 
 export interface Request {

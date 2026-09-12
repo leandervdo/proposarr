@@ -34,28 +34,42 @@ const (
 var ErrNotFound = errors.New("not found")
 
 type Run struct {
-	ID             int64               `json:"id"`
-	Kind           media.Kind          `json:"kind"`
-	Vibe           string              `json:"vibe,omitempty"`
-	UseTaste       bool                `json:"use_taste"` // false for an open search
-	Model          string              `json:"model"`
-	Effort         string              `json:"effort"`
-	Status         RunStatus           `json:"status"`
-	Error          string              `json:"error,omitempty"`
-	StartedAt      time.Time           `json:"started_at"`
-	FinishedAt     *time.Time          `json:"finished_at,omitempty"`
-	CostUSD        float64             `json:"cost_usd"`
-	InputTokens    int                 `json:"input_tokens"` // input + cache creation + cache read
-	OutputTokens   int                 `json:"output_tokens"`
-	NumTurns       int                 `json:"num_turns"`
-	SessionID      string              `json:"session_id,omitempty"`
-	LibraryCount   int                 `json:"library_count"`
-	HistoryCount   int                 `json:"history_count"`
-	CandidateCount int                 `json:"candidate_count"`
-	PickCount      int                 `json:"pick_count"`
-	Warnings       []string            `json:"warnings"`
-	Rejected       []pipeline.Rejected `json:"rejected"`
-	Profile        *profile.Profile    `json:"profile,omitempty"` // only filled by GetRun
+	ID             int64                 `json:"id"`
+	Kind           media.Kind            `json:"kind"`
+	Vibe           string                `json:"vibe,omitempty"`
+	UseTaste       bool                  `json:"use_taste"` // false for an open search
+	Model          string                `json:"model"`
+	Effort         string                `json:"effort"`
+	Status         RunStatus             `json:"status"`
+	Error          string                `json:"error,omitempty"`
+	StartedAt      time.Time             `json:"started_at"`
+	FinishedAt     *time.Time            `json:"finished_at,omitempty"`
+	CostUSD        float64               `json:"cost_usd"`
+	InputTokens    int                   `json:"input_tokens"` // input + cache creation + cache read
+	OutputTokens   int                   `json:"output_tokens"`
+	NumTurns       int                   `json:"num_turns"`
+	SessionID      string                `json:"session_id,omitempty"`
+	LibraryCount   int                   `json:"library_count"`
+	HistoryCount   int                   `json:"history_count"`
+	CandidateCount int                   `json:"candidate_count"`
+	PickCount      int                   `json:"pick_count"`
+	Warnings       []string              `json:"warnings"`
+	Rejected       []pipeline.Rejected   `json:"rejected"`
+	Owned          []pipeline.OwnedMatch `json:"owned"`             // open search: library titles that match the description
+	Profile        *profile.Profile      `json:"profile,omitempty"` // only filled by GetRun
+}
+
+// LibrarySearch is a search Proposarr started for a title already in the
+// library; only the latest one per title is kept. Kind, TMDBID and TargetID
+// identify it and are not part of its JSON.
+type LibrarySearch struct {
+	Kind           media.Kind `json:"-"`
+	TMDBID         int        `json:"-"`
+	TargetID       int        `json:"-"` // the Radarr movie id
+	QualityProfile string     `json:"quality_profile"`
+	RequestedAt    time.Time  `json:"requested_at"`
+	// Release is the request.ReleaseCheck: what Radarr's search did.
+	Release json.RawMessage `json:"release"`
 }
 
 // Request is one add to Sonarr/Radarr, always with an explicitly chosen quality profile.
@@ -128,6 +142,14 @@ type Store interface {
 	// UpdateRequestRelease sets the release check, and the quality profile it
 	// ended with, on the pick's latest request. ErrNotFound when there is none.
 	UpdateRequestRelease(ctx context.Context, pickID int64, qualityProfile string, release json.RawMessage) error
+	// RecordLibrarySearch stores a search for a library title, replacing the
+	// previous one for (Kind, TMDBID).
+	RecordLibrarySearch(ctx context.Context, s LibrarySearch) error
+	// UpdateLibrarySearch sets the release check, and the quality profile it
+	// ended with, on a title's search. ErrNotFound when there is none.
+	UpdateLibrarySearch(ctx context.Context, kind media.Kind, tmdbID int, qualityProfile string, release json.RawMessage) error
+	// LibrarySearches returns the searches for tmdbIDs that have one, by TMDB id.
+	LibrarySearches(ctx context.Context, kind media.Kind, tmdbIDs []int) (map[int]LibrarySearch, error)
 	// Excluded returns ids that must not be proposed again: accepted, ignored,
 	// later with until in the future, or successfully requested.
 	Excluded(ctx context.Context, kind media.Kind) (map[int]bool, error)
