@@ -2,8 +2,9 @@
 package arr
 
 type QualityProfile struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
+	ID    int           `json:"id"`
+	Name  string        `json:"name"`
+	Rules *ProfileRules `json:"-"` // filled when read from the app
 }
 
 type RootFolder struct {
@@ -21,13 +22,14 @@ type SystemStatus struct {
 // Lookup is a title returned by an *arr lookup endpoint, ready to add.
 // LibraryID is non-zero when the title is already in the library.
 type Lookup struct {
-	LibraryID int
-	Title     string
-	Year      int
-	TMDBID    int
-	TVDBID    int
-	Ratings   Ratings
-	Raw       map[string]any // the lookup resource, posted back on add
+	LibraryID        int
+	Title            string
+	Year             int
+	TMDBID           int
+	TVDBID           int
+	OriginalLanguage int // Radarr language id, 0 when unknown
+	Ratings          Ratings
+	Raw              map[string]any // the lookup resource, posted back on add
 }
 
 // Ratings are the third-party ratings of a lookup; zero means unknown.

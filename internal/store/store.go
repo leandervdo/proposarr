@@ -3,6 +3,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -67,6 +68,8 @@ type Request struct {
 	Status         string    `json:"status"` // added | failed
 	Error          string    `json:"error,omitempty"`
 	RequestedAt    time.Time `json:"requested_at"`
+	// Release is the request.ReleaseCheck of a Radarr movie: what Radarr's search did.
+	Release json.RawMessage `json:"release,omitempty"`
 }
 
 type Pick struct {
@@ -122,6 +125,9 @@ type Store interface {
 	// until is only meaningful for VerdictLater.
 	SetVerdict(ctx context.Context, kind media.Kind, tmdbID int, v Verdict, until *time.Time) error
 	RecordRequest(ctx context.Context, r Request) error
+	// UpdateRequestRelease sets the release check, and the quality profile it
+	// ended with, on the pick's latest request. ErrNotFound when there is none.
+	UpdateRequestRelease(ctx context.Context, pickID int64, qualityProfile string, release json.RawMessage) error
 	// Excluded returns ids that must not be proposed again: accepted, ignored,
 	// later with until in the future, or successfully requested.
 	Excluded(ctx context.Context, kind media.Kind) (map[int]bool, error)

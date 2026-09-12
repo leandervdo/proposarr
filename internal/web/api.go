@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -311,6 +312,7 @@ func (s *Server) requestPick(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		QualityProfileID int    `json:"quality_profile_id"`
 		RootFolder       string `json:"root_folder"`
+		IfNothingFits    string `json:"if_nothing_fits"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -319,6 +321,11 @@ func (s *Server) requestPick(w http.ResponseWriter, r *http.Request) {
 	// There is no default quality profile: every title needs an explicit choice.
 	if body.QualityProfileID <= 0 {
 		writeError(w, http.StatusBadRequest, "quality_profile_id is required: choose a quality profile for this title")
+		return
+	}
+	fallback, err := request.ParseFallback(body.IfNothingFits)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "if_nothing_fits must be switch or wait")
 		return
 	}
 	if s.o.Adder == nil {
@@ -330,7 +337,7 @@ func (s *Server) requestPick(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app := appOf(pick.Kind)
-	ch := &choice{profileID: body.QualityProfileID, rootFolder: strings.TrimSpace(body.RootFolder)}
+	ch := &choice{profileID: body.QualityProfileID, rootFolder: strings.TrimSpace(body.RootFolder), fallback: fallback}
 	if s.o.App != nil {
 		if _, root, ok := s.o.App(app); ok {
 			ch.defaultRoot = root
@@ -364,6 +371,9 @@ func (s *Server) requestPick(w http.ResponseWriter, r *http.Request) {
 
 	added := store.Request{PickID: pick.ID, App: app, TargetID: res.ID, QualityProfile: res.QualityProfile,
 		RootFolder: res.RootFolder, Status: "added", RequestedAt: s.now().UTC()}
+	if res.Follow != nil {
+		added.Release = releaseJSON(request.Checking(res.QualityProfile))
+	}
 	if err := s.o.Store.RecordRequest(r.Context(), added); err != nil {
 		s.internalError(w, "record request", fmt.Errorf("added to %s but not recorded: %w", res.App, err))
 		return
@@ -373,6 +383,126 @@ func (s *Server) requestPick(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("title added", "app", app, "title", res.Title, "quality_profile", res.QualityProfile, "root_folder", res.RootFolder)
 	s.respondPick(w, r, id)
+	s.followRelease(pick.ID, res)
+}
+
+// switchProfile moves a movie added through this pick to another quality
+// profile and has Radarr search again. The profile is always the user's
+// explicit choice.
+func (s *Server) switchProfile(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		QualityProfileID int `json:"quality_profile_id"`
+	}
+	if err := decodeBody(w, r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if body.QualityProfileID <= 0 {
+		writeError(w, http.StatusBadRequest, "quality_profile_id is required: choose the quality profile to switch to")
+		return
+	}
+	if s.o.Adder == nil {
+		writeError(w, http.StatusBadRequest, "adding titles is not configured")
+		return
+	}
+	pick, ok := s.loadPick(w, r, id)
+	if !ok {
+		return
+	}
+	if pick.Kind != media.Movies {
+		writeError(w, http.StatusBadRequest, "only a movie's quality profile can be switched after its search")
+		return
+	}
+	prev := pick.Request
+	if prev == nil || prev.App != "radarr" || prev.Status != "added" || prev.TargetID <= 0 {
+		writeError(w, http.StatusConflict, pick.Title+" has not been added to Radarr")
+		return
+	}
+	if s.isFollowing(pick.ID) {
+		writeError(w, http.StatusConflict, "Radarr is still searching for "+pick.Title)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	item := request.Item{Kind: pick.Kind, TMDBID: pick.TMDBID, Title: pick.Title, Year: pick.Year}
+	res, err := s.o.Adder.SwitchProfile(ctx, item, prev.TargetID, body.QualityProfileID)
+	switch {
+	case err == nil:
+	case errors.Is(err, request.ErrUnknownProfile), errors.Is(err, request.ErrNotConfigured):
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	case errors.Is(err, request.ErrNotInLibrary):
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	default:
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	switched := *prev
+	switched.QualityProfile, switched.Release = res.QualityProfile, nil
+	if res.Follow != nil {
+		switched.Release = releaseJSON(request.Checking(res.QualityProfile))
+	}
+	if err := s.o.Store.RecordRequest(r.Context(), switched); err != nil {
+		s.internalError(w, "record request", fmt.Errorf("switched in Radarr but not recorded: %w", err))
+		return
+	}
+	s.log.Info("quality profile switched", "title", res.Title, "quality_profile", res.QualityProfile)
+	s.respondPick(w, r, id)
+	s.followRelease(pick.ID, res)
+}
+
+// followRelease follows Radarr's search for an added or switched movie in the
+// background, then stores the outcome on the pick's latest request and
+// announces the pick.
+func (s *Server) followRelease(pickID int64, res request.Result) {
+	if res.Follow == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return // reopening the store marks the check searching
+	}
+	s.following[pickID] = true
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		check := res.Follow(s.ctx)
+		s.log.Info("release check", "title", res.Title, "status", check.Status, "quality_profile", check.Profile,
+			"switched_from", check.SwitchedFrom, "found", check.Found, "alternatives", len(check.Alternatives), "error", check.Error)
+		// The outcome is stored even while the server shuts down.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 10*time.Second)
+		defer cancel()
+		err := s.o.Store.UpdateRequestRelease(ctx, pickID, check.Profile, releaseJSON(check))
+		s.mu.Lock()
+		delete(s.following, pickID)
+		s.mu.Unlock()
+		if err != nil {
+			s.log.Error("store release check", "pick_id", pickID, "err", err)
+			return
+		}
+		if pick, err := s.o.Store.GetPick(ctx, pickID); err == nil {
+			s.events.publish("pick.updated", normalizePick(pick))
+		}
+	}()
+}
+
+func (s *Server) isFollowing(pickID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.following[pickID]
+}
+
+func releaseJSON(c request.ReleaseCheck) json.RawMessage {
+	raw, _ := json.Marshal(c) // a ReleaseCheck always encodes
+	return raw
 }
 
 func (s *Server) appOptions(w http.ResponseWriter, r *http.Request) {
@@ -528,8 +658,13 @@ type choice struct {
 	profileID   int
 	rootFolder  string
 	defaultRoot string
+	fallback    request.Fallback
 
 	chosenProfile, chosenRoot string
+}
+
+func (c *choice) ChooseFallback(context.Context, request.Item, arr.QualityProfile) (request.Fallback, error) {
+	return c.fallback, nil
 }
 
 func (c *choice) ChooseQualityProfile(_ context.Context, _ request.Item, app string, profiles []arr.QualityProfile) (arr.QualityProfile, error) {

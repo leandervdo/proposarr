@@ -30,6 +30,8 @@ type Runner interface {
 // Adder adds a title to Sonarr or Radarr (request.Requester).
 type Adder interface {
 	Add(ctx context.Context, item request.Item, ch request.Chooser) (request.Result, error)
+	// SwitchProfile moves an added movie to another quality profile and searches again.
+	SwitchProfile(ctx context.Context, item request.Item, movieID, profileID int) (request.Result, error)
 }
 
 // AppCatalog lists the quality profiles and root folders of an *arr app.
@@ -89,14 +91,15 @@ type Server struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	mu      sync.Mutex
-	closed  bool
-	running map[media.Kind]*activeRun
+	mu        sync.Mutex
+	closed    bool
+	running   map[media.Kind]*activeRun
+	following map[int64]bool // picks whose release check runs in the background
 }
 
 func New(o Options) *Server {
 	s := &Server{o: o, log: o.Logger, now: o.Now, events: newHub(), titles: newTitleCache(titleCacheTTL, titleCacheSize),
-		running: map[media.Kind]*activeRun{}}
+		running: map[media.Kind]*activeRun{}, following: map[int64]bool{}}
 	if s.log == nil {
 		s.log = slog.New(slog.DiscardHandler)
 	}
@@ -125,6 +128,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/picks", s.listPicks)
 	mux.HandleFunc("POST /api/picks/{id}/verdict", s.setVerdict)
 	mux.HandleFunc("POST /api/picks/{id}/request", s.requestPick)
+	mux.HandleFunc("POST /api/picks/{id}/request/profile", s.switchProfile)
 	mux.HandleFunc("GET /api/apps/{app}/options", s.appOptions)
 	mux.HandleFunc("GET /api/library", s.library)
 	mux.HandleFunc("GET /api/titles/{kind}/{tmdb_id}", s.titleDetails)

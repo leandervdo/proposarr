@@ -15,6 +15,7 @@ type addFlags struct {
 	tmdbID         int
 	qualityProfile string
 	rootFolder     string
+	ifNothingFits  request.Fallback
 	configPath     string
 }
 
@@ -25,6 +26,7 @@ func (c *cli) parseAdd(args []string) (addFlags, error) {
 	id := fs.Int("tmdb", 0, "TMDB id of the title (required)")
 	qp := fs.String("quality-profile", "", "quality profile name or id; asked interactively when omitted")
 	root := fs.String("root-folder", "", "root folder path (default from config, or asked when there are several)")
+	fallback := fs.String("if-nothing-fits", "", "movies with --quality-profile: switch to the best quality profile that finds a release, or wait (default wait); asked interactively otherwise")
 	if err := parseFlags(fs, args); err != nil {
 		return addFlags{}, err
 	}
@@ -38,7 +40,11 @@ func (c *cli) parseAdd(args []string) (addFlags, error) {
 	if *qp == "" && !c.interactive {
 		return addFlags{}, usageError{"stdin is not a terminal: pass --quality-profile NAME|ID"}
 	}
-	return addFlags{kind: kind, tmdbID: *id, qualityProfile: *qp, rootFolder: *root, configPath: *cfgPath}, nil
+	ifNothingFits, err := request.ParseFallback(*fallback)
+	if err != nil {
+		return addFlags{}, usageError{"--if-nothing-fits must be switch or wait"}
+	}
+	return addFlags{kind: kind, tmdbID: *id, qualityProfile: *qp, rootFolder: *root, ifNothingFits: ifNothingFits, configPath: *cfgPath}, nil
 }
 
 func (c *cli) addCmd(ctx context.Context, args []string) error {
@@ -79,7 +85,7 @@ func (c *cli) addCmd(ctx context.Context, args []string) error {
 	}
 	var ch request.Chooser
 	if f.qualityProfile != "" {
-		ch = request.FixedChooser{QualityProfile: f.qualityProfile, RootFolder: f.rootFolder}
+		ch = request.FixedChooser{QualityProfile: f.qualityProfile, RootFolder: f.rootFolder, Fallback: f.ifNothingFits}
 	} else {
 		ch = newTerminalChooser(bufio.NewReader(c.stdin), c.stderr)
 	}
@@ -88,6 +94,7 @@ func (c *cli) addCmd(ctx context.Context, args []string) error {
 	switch {
 	case err == nil:
 		printAdded(c.stdout, res)
+		followRelease(ctx, c.stdout, c.stderr, res)
 		return nil
 	case errors.Is(err, request.ErrAlreadyInLibrary):
 		fmt.Fprintf(c.stdout, "%s is already in %s.\n", item.Label(), f.kind.App())

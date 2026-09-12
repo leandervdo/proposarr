@@ -126,6 +126,7 @@ func (c *cli) addPicks(ctx context.Context, req *request.Requester, run *pipelin
 		switch {
 		case err == nil:
 			printAdded(c.stdout, res)
+			followRelease(ctx, c.stdout, c.stderr, res)
 		case errors.Is(err, request.ErrAlreadyInLibrary):
 			fmt.Fprintf(c.stderr, "%s is already in %s.\n", item.Label(), app)
 		case errors.Is(err, request.ErrCancelled):
@@ -142,6 +143,70 @@ func (c *cli) addPicks(ctx context.Context, req *request.Requester, run *pipelin
 
 func printAdded(w io.Writer, r request.Result) {
 	fmt.Fprintf(w, "Added %s to %s with quality profile %s in %s\n", r.Title, r.App, r.QualityProfile, r.RootFolder)
+}
+
+// followRelease waits for Radarr's search after adding a movie and prints what it did.
+func followRelease(ctx context.Context, stdout, stderr io.Writer, res request.Result) {
+	if res.Follow == nil {
+		return
+	}
+	fmt.Fprintln(stderr, "Waiting for Radarr's search…")
+	printRelease(stdout, res.Follow(ctx))
+}
+
+func printRelease(w io.Writer, c request.ReleaseCheck) {
+	if c.SwitchedFrom != "" {
+		fmt.Fprintf(w, "Nothing fit %s, so the quality profile is now %s.\n", c.SwitchedFrom, c.Profile)
+	}
+	switch c.Status {
+	case request.CheckGrabbed:
+		fmt.Fprintf(w, "Radarr is grabbing %s\n", describeRelease(*c.Release))
+	case request.CheckPending:
+		fmt.Fprintf(w, "Radarr holds %s for your delay profile and grabs it after the delay.\n", describeRelease(*c.Release))
+	case request.CheckSearching:
+		fmt.Fprintf(w, "Radarr is still searching; it grabs a release if one fits %s.\n", c.Profile)
+	case request.CheckUnavailable:
+		fmt.Fprintln(w, "Not released yet; Radarr grabs it once it is available.")
+	case request.CheckFailed:
+		fmt.Fprintf(w, "Could not check Radarr's search: %s\n", c.Error)
+	case request.CheckWaiting:
+		if c.Found == 0 {
+			fmt.Fprintln(w, "No releases on your indexers yet; Radarr keeps looking.")
+		} else {
+			qs := make([]string, len(c.Qualities))
+			for i, q := range c.Qualities {
+				qs[i] = fmt.Sprintf("%d × %s", q.Count, q.Quality)
+			}
+			fmt.Fprintf(w, "%s found, none fit %s (%s); Radarr keeps looking.\n", plural(c.Found, "release"), c.Profile, strings.Join(qs, ", "))
+		}
+		if len(c.Alternatives) > 0 {
+			fmt.Fprintln(w, "Other quality profiles would grab a release now:")
+			for _, o := range c.Alternatives {
+				fmt.Fprintf(w, "  %s: %s, best %s\n", o.Name, plural(o.Count, "release"), describeRelease(o.Best))
+			}
+		}
+	}
+}
+
+func describeRelease(r request.ReleaseInfo) string {
+	parts := []string{r.Quality}
+	if r.Size > 0 {
+		parts = append(parts, fmt.Sprintf("%.1f GB", float64(r.Size)/1e9))
+	}
+	if r.Seeders != nil {
+		parts = append(parts, plural(*r.Seeders, "seeder"))
+	}
+	if r.Indexer != "" {
+		parts = append(parts, r.Indexer)
+	}
+	return fmt.Sprintf("%s (%s)", r.Title, strings.Join(parts, ", "))
+}
+
+func plural(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 func renderRun(w io.Writer, r *pipeline.Run) {

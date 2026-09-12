@@ -28,7 +28,21 @@ interface Request {
   pick_id: number; app: "radarr" | "sonarr"; target_id?: number;
   quality_profile: string; root_folder: string; status: "added" | "failed";
   error?: string; requested_at: string;
+  release?: ReleaseCheck;  // Radarr movies: what Radarr's search did, see "Release check"
 }
+
+interface ReleaseCheck {
+  status: "checking" | "grabbed" | "pending" | "waiting" | "searching" | "unavailable" | "failed";
+  profile: string;               // the quality profile Radarr searched with
+  switched_from?: string;        // nothing fit this profile, so Proposarr switched away from it
+  release?: ReleaseInfo;         // grabbed: what Radarr grabbed; pending: what Radarr holds for a delay profile
+  found: number;                 // waiting: releases the explaining search found
+  qualities: { quality: string; count: number }[];  // waiting: what was found, most common first
+  alternatives: ProfileOption[]; // waiting: other profiles that would grab a release now, best first
+  error?: string;                // failed
+}
+interface ReleaseInfo { title: string; quality: string; size?: number; indexer?: string; protocol?: string; seeders?: number }
+interface ProfileOption { id: number; name: string; count: number; best: ReleaseInfo }
 
 interface Pick {
   id: number; run_id: number; run_vibe?: string; run_use_taste: boolean; found_at: string;  // found_at = the run's started_at
@@ -98,13 +112,29 @@ interface RootFolder { id: number; path: string; free_space: number }
 | GET | `/api/picks?kind=&run=latest\|all\|{id}&verdict=none\|accepted\|ignored\|later&added=true&search=true\|false&distinct=true&limit=&offset=` | | `Pick[]`, newest run first, then score. `run` defaults to `latest`; `all` spans every succeeded run. `added=true` keeps picks whose latest request has status `added`, ordered by `request.requested_at` newest first. `search=true` keeps picks from open-search runs (`use_taste` false), `search=false` from taste runs. `distinct=true` returns one pick per `(tmdb_id, kind)`, the most recent. `limit` defaults to 200 (max 1000), `offset` to 0. The `X-Total-Count` response header is the number of matching picks before `limit`/`offset`. Titles currently in the Radarr/Sonarr library are left out, except picks added through Proposarr (so they still show under Added) |
 | POST | `/api/picks/{id}/verdict` | `{verdict: Verdict \| "", later_days?: number}` | `Pick`. `later_days` defaults to 30. `""` clears the verdict (undo) |
 | GET | `/api/apps/{radarr\|sonarr}/options` | | `{quality_profiles: QualityProfile[], root_folders: RootFolder[], default_root_folder: string}` |
-| POST | `/api/picks/{id}/request` | `{quality_profile_id: number, root_folder?: string}` | `Pick` with `request` and verdict `accepted`. `400` without `quality_profile_id` (there is no default) or when several root folders exist and none was given or configured. `409` when the title is already in the library |
+| POST | `/api/picks/{id}/request` | `{quality_profile_id: number, root_folder?: string, if_nothing_fits?: "switch" \| "wait"}` | `Pick` with `request` and verdict `accepted`. For a Radarr movie `request.release` has status `checking`; see "Release check". `if_nothing_fits` defaults to `wait` and is ignored for series. `400` without `quality_profile_id` (there is no default), for another `if_nothing_fits`, or when several root folders exist and none was given or configured. `409` when the title is already in the library |
+| POST | `/api/picks/{id}/request/profile` | `{quality_profile_id: number}` | `Pick` whose `request` has the new `quality_profile` and `release.status` `checking`, after moving the added movie to that profile in Radarr and starting Radarr's search. `400` without or with an unknown `quality_profile_id`, or for a series. `409` when the pick was not added to Radarr, the movie is no longer there, or its release check is still running. `502` when Radarr fails |
 | GET | `/api/library?kind=` | | `{kind, titles: LibraryTitle[], profile: Profile \| null}` |
 | GET | `/api/titles/{movies\|series}/{tmdb_id}` | | `TitleDetails`. Fetched live from TMDB with credits, videos and watch providers, and ratings from Radarr (movies) or Sonarr (series); cached in memory for 1 hour. `404` when TMDB does not know the id, `400` when TMDB is not configured. A ratings failure only leaves `ratings` absent |
 | GET | `/api/events` | | Server-sent events, see below |
 | GET | `/healthz` | | `200 ok`, plain text. Never requires auth (for container health checks) |
 
 Everything else under `/` serves the single-page app, falling back to `index.html`.
+
+## Release check
+
+Radarr does every search and grab. Adding a movie turns on Radarr's own search, exactly as adding it in Radarr would. Proposarr then follows that search in the background and stores the outcome in `request.release`, starting from `checking`. When it is done, `pick.updated` carries the pick, and every endpoint that returns picks includes it, so several picks' states can be shown without polling.
+
+- `grabbed`: Radarr grabbed `release`.
+- `pending`: Radarr found `release` but holds it for a delay profile.
+- `unavailable`: the movie is not released yet for its minimum availability; Radarr grabs it later.
+- `searching`: Radarr's search was still running after about 45 seconds, or the server restarted during the check. Radarr carries on.
+- `failed`: the outcome could not be read (`error`).
+- `waiting`: Radarr grabbed nothing. Proposarr then runs one interactive search (Radarr's `GET /api/v3/release`, which grabs nothing) to explain why. `found` is what the indexers returned and `qualities` summarises it. `alternatives` lists the other quality profiles that would grab one of those releases now, best first: the highest quality they would grab, then the most releases. A release counts for a profile when its quality is allowed, its custom format score reaches the profile's minimum and its language fits, the way Radarr judges it. Rejections that don't depend on the profile (too few seeders, size limits, an unparsable title) rule it out for every profile.
+
+`if_nothing_fits` is chosen per title with the quality profile. With `switch`, a `waiting` result with alternatives makes Proposarr move the movie to the first alternative and have Radarr search again, once. The outcome then has `switched_from`, and `request.quality_profile` becomes the new profile. With `wait`, the user can switch later with `POST /api/picks/{id}/request/profile`. That request is recorded again with the new `quality_profile` and the original `requested_at`, and is followed the same way. It never switches a second time on its own.
+
+Series are added with Sonarr's own search and have no `release`.
 
 ## Open search
 
@@ -200,4 +230,4 @@ interface Settings {
 | `run.started` | `Run` |
 | `run.progress` | `{run_id, kind, message}` |
 | `run.finished` | `Run` (final status) |
-| `pick.updated` | `Pick` (after a verdict or request) |
+| `pick.updated` | `Pick` (after a verdict or request, and when a release check finishes) |

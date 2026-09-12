@@ -46,6 +46,8 @@ export interface Request {
   status: "added" | "failed";
   error?: string;
   requested_at: string;
+  /** Radarr movies: how Radarr's search went. Starts as "checking" and is updated through pick.updated. */
+  release?: ReleaseCheck;
 }
 
 export interface Pick {
@@ -76,6 +78,56 @@ export interface Pick {
   verdict_at?: string;
   later_until?: string;
   request?: Request;
+}
+
+/** One indexer release as Radarr parsed it. */
+export interface ReleaseInfo {
+  title: string;
+  /** e.g. "Remux-1080p" */
+  quality: string;
+  /** bytes, when known */
+  size?: number;
+  indexer?: string;
+  /** "torrent" or "usenet" */
+  protocol?: string;
+  /** Torrents from a search only. */
+  seeders?: number;
+}
+
+/** Another quality profile that would grab a release right now. */
+export interface ProfileOption {
+  id: number;
+  name: string;
+  /** Releases this profile would accept. */
+  count: number;
+  /** The one it would most likely grab. */
+  best: ReleaseInfo;
+}
+
+/** What to do when Radarr's search grabs nothing for the chosen profile (movies only). */
+export type IfNothingFits = "switch" | "wait";
+
+/** What Radarr's own search did right after adding a movie (Radarr only). */
+export interface ReleaseCheck {
+  /**
+   * checking: Proposarr is still following Radarr's search.
+   * grabbed: Radarr grabbed `release`. pending: Radarr holds `release` for a delay profile.
+   * waiting: Radarr grabbed nothing. searching: Radarr was still searching when Proposarr stopped waiting.
+   * unavailable: not released yet under Radarr's minimum availability. failed: the outcome couldn't be read.
+   */
+  status: "checking" | "grabbed" | "pending" | "waiting" | "searching" | "unavailable" | "failed";
+  /** The profile Radarr searched with; after a switch, the new one. */
+  profile: string;
+  /** Proposarr switched away from this profile because nothing fit it. */
+  switched_from?: string;
+  release?: ReleaseInfo;
+  /** waiting: releases the explaining search found (0 = none on the indexers). */
+  found: number;
+  /** waiting: what was found, most common first. */
+  qualities: { quality: string; count: number }[];
+  /** waiting: other profiles that would grab one now, best first. */
+  alternatives: ProfileOption[];
+  error?: string;
 }
 
 /** Real ratings. Series usually only have IMDb. Unknown values are omitted. */

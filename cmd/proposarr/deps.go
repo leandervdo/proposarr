@@ -168,6 +168,7 @@ func (d *deps) requester() *request.Requester {
 	}
 	if d.radarr != nil {
 		r.Radarr = d.radarr
+		r.RadarrSearch = d.radarr
 	}
 	if d.sonarr != nil {
 		r.Sonarr = d.sonarr

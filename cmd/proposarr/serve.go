@@ -125,17 +125,7 @@ func serverOptions(rt *runtime, st store.Store, log *slog.Logger) web.Options {
 			}
 			return runRequest(s.cfg, kind, vibe, !useTaste, env), nil
 		},
-		Adder: adderFunc(func(ctx context.Context, item request.Item, ch request.Chooser) (request.Result, error) {
-			req := rt.state().deps.requester()
-			// The web chooser applies the root folder from the request, else the configured one.
-			req.RadarrRootFolder, req.SonarrRootFolder = "", ""
-			res, err := req.Add(ctx, item, ch)
-			if err == nil || errors.Is(err, request.ErrAlreadyInLibrary) {
-				// The library changed, or the cached snapshot missed it: refetch on the next read.
-				rt.state().deps.library(false).Invalidate(item.Kind)
-			}
-			return res, err
-		}),
+		Adder: webAdder{rt},
 		App: func(app string) (web.AppCatalog, string, bool) {
 			s := rt.state()
 			switch {
@@ -170,8 +160,21 @@ func serverOptions(rt *runtime, st store.Store, log *slog.Logger) web.Options {
 	}
 }
 
-type adderFunc func(ctx context.Context, item request.Item, ch request.Chooser) (request.Result, error)
+// webAdder adds titles with the runtime's current adapters.
+type webAdder struct{ rt *runtime }
 
-func (f adderFunc) Add(ctx context.Context, item request.Item, ch request.Chooser) (request.Result, error) {
-	return f(ctx, item, ch)
+func (a webAdder) Add(ctx context.Context, item request.Item, ch request.Chooser) (request.Result, error) {
+	req := a.rt.state().deps.requester()
+	// The web chooser applies the root folder from the request, else the configured one.
+	req.RadarrRootFolder, req.SonarrRootFolder = "", ""
+	res, err := req.Add(ctx, item, ch)
+	if err == nil || errors.Is(err, request.ErrAlreadyInLibrary) {
+		// The library changed, or the cached snapshot missed it: refetch on the next read.
+		a.rt.state().deps.library(false).Invalidate(item.Kind)
+	}
+	return res, err
+}
+
+func (a webAdder) SwitchProfile(ctx context.Context, item request.Item, movieID, profileID int) (request.Result, error) {
+	return a.rt.state().deps.requester().SwitchProfile(ctx, item, movieID, profileID)
 }

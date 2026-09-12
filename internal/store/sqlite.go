@@ -106,6 +106,9 @@ var migrations = [][]string{
 		`ALTER TABLE picks ADD COLUMN imdb_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE picks ADD COLUMN ratings TEXT`,
 	},
+	{
+		`ALTER TABLE requests ADD COLUMN release TEXT`,
+	},
 }
 
 // SQLite is the Store backed by a single SQLite file.
@@ -115,7 +118,8 @@ type SQLite struct {
 }
 
 // Open opens (creating if needed) the database at path and applies migrations.
-// Runs left in status running by a previous process are marked failed.
+// Runs left in status running by a previous process are marked failed, and
+// release checks it was still following are marked searching: Radarr carries on.
 func Open(path string) (*SQLite, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
@@ -136,6 +140,11 @@ func Open(path string) (*SQLite, error) {
 		RunFailed, "interrupted: server restarted", fmtTime(s.now()), RunRunning); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store: mark interrupted runs: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE requests SET release = json_set(release, '$.status', 'searching')
+		WHERE json_valid(release) AND json_extract(release, '$.status') = 'checking'`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("store: mark interrupted release checks: %w", err)
 	}
 	return s, nil
 }
@@ -480,7 +489,7 @@ func (s *SQLite) queryPicks(ctx context.Context, where string, args []any, order
 			p.tmdb_id, p.imdb_id, p.kind, p.title, p.year, p.reason, p.related_to, p.score, p.source,
 			p.overview, p.genres, p.rating, p.streaming, p.poster_url, p.ratings,
 			v.verdict, v.until, v.decided_at,
-			rq.app, rq.target_id, rq.quality_profile, rq.root_folder, rq.status, rq.error, rq.requested_at ` + pickFrom
+			rq.app, rq.target_id, rq.quality_profile, rq.root_folder, rq.status, rq.error, rq.requested_at, rq.release ` + pickFrom
 	if where != "" {
 		q += ` WHERE ` + where
 	}
@@ -500,13 +509,14 @@ func (s *SQLite) queryPicks(ctx context.Context, where string, args []any, order
 			ratings                                 sql.NullString
 			verdict, until, decided                 sql.NullString
 			app, qp, root, rstatus, rerr, requested sql.NullString
+			release                                 sql.NullString
 			target                                  sql.NullInt64
 		)
 		if err := rows.Scan(&p.ID, &p.RunID, &p.RunVibe, &p.RunUseTaste, &found,
 			&p.TMDBID, &p.IMDBID, &kind, &p.Title, &p.Year, &p.Reason, &related, &p.Score, &p.Source,
 			&p.Overview, &genres, &p.Rating, &streaming, &p.PosterURL, &ratings,
 			&verdict, &until, &decided,
-			&app, &target, &qp, &root, &rstatus, &rerr, &requested); err != nil {
+			&app, &target, &qp, &root, &rstatus, &rerr, &requested, &release); err != nil {
 			return nil, fmt.Errorf("store: scan pick: %w", err)
 		}
 		if p.FoundAt, err = parseTime(found); err != nil {
@@ -542,6 +552,9 @@ func (s *SQLite) queryPicks(ctx context.Context, where string, args []any, order
 				RootFolder: root.String, Status: rstatus.String, Error: rerr.String}
 			if req.RequestedAt, err = parseTime(requested.String); err != nil {
 				return nil, err
+			}
+			if release.String != "" {
+				req.Release = json.RawMessage(release.String)
 			}
 			p.Request = req
 		}
@@ -579,13 +592,33 @@ func (s *SQLite) RecordRequest(ctx context.Context, r Request) error {
 	if r.RequestedAt.IsZero() {
 		r.RequestedAt = s.now()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO requests (pick_id, app, target_id, quality_profile, root_folder, status, error, requested_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.PickID, r.App, r.TargetID, r.QualityProfile, r.RootFolder, r.Status, r.Error, fmtTime(r.RequestedAt))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO requests (pick_id, app, target_id, quality_profile, root_folder, status, error, requested_at, release)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.PickID, r.App, r.TargetID, r.QualityProfile, r.RootFolder, r.Status, r.Error, fmtTime(r.RequestedAt), nullJSON(r.Release))
 	if err != nil {
 		return fmt.Errorf("store: record request: %w", err)
 	}
 	return nil
+}
+
+func (s *SQLite) UpdateRequestRelease(ctx context.Context, pickID int64, qualityProfile string, release json.RawMessage) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE requests SET quality_profile = ?, release = ?
+		WHERE id = (SELECT MAX(id) FROM requests WHERE pick_id = ?)`, qualityProfile, nullJSON(release), pickID)
+	if err != nil {
+		return fmt.Errorf("store: update request release: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// nullJSON stores empty JSON as NULL.
+func nullJSON(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	return string(raw)
 }
 
 func (s *SQLite) Excluded(ctx context.Context, kind media.Kind) (map[int]bool, error) {

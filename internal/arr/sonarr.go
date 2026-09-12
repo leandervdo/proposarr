@@ -108,7 +108,7 @@ func (s *Sonarr) Add(ctx context.Context, l *Lookup, o AddOptions) (Added, error
 
 	var res added
 	if err := s.c.post(ctx, "/api/v3/series", body, &res); err != nil {
-		return Added{}, err
+		return Added{}, alreadyAdded(err)
 	}
 	return Added{ID: res.ID, Title: res.Title}, nil
 }

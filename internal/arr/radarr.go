@@ -14,12 +14,16 @@ import (
 	"github.com/leandervdo/proposarr/internal/media"
 )
 
-// Radarr is a Radarr v3 API client.
-type Radarr struct{ c client }
+// Radarr is a Radarr v3 API client. Release searches and grabs use search,
+// which allows for slow indexers.
+type Radarr struct{ c, search client }
 
 // NewRadarr returns a client for the Radarr instance at baseURL.
 func NewRadarr(baseURL, apiKey string, hc *http.Client) *Radarr {
-	return &Radarr{client{app: "radarr", hc: newHTTP(baseURL, apiKey, hc)}}
+	return &Radarr{
+		c:      client{app: "radarr", hc: newHTTP(baseURL, apiKey, hc)},
+		search: client{app: "radarr", hc: newHTTP(baseURL, apiKey, withTimeout(hc, searchTimeout))},
+	}
 }
 
 // Status returns the system status, used as a connection test.
@@ -132,10 +136,13 @@ func (r *Radarr) Lookup(ctx context.Context, tmdbID int) (*Lookup, error) {
 		return nil, err
 	}
 	var typed struct {
-		ID      int    `json:"id"`
-		Title   string `json:"title"`
-		Year    int    `json:"year"`
-		TMDBID  int    `json:"tmdbId"`
+		ID               int    `json:"id"`
+		Title            string `json:"title"`
+		Year             int    `json:"year"`
+		TMDBID           int    `json:"tmdbId"`
+		OriginalLanguage struct {
+			ID int `json:"id"`
+		} `json:"originalLanguage"`
 		Ratings struct {
 			IMDB           rating `json:"imdb"`
 			RottenTomatoes rating `json:"rottenTomatoes"`
@@ -146,12 +153,38 @@ func (r *Radarr) Lookup(ctx context.Context, tmdbID int) (*Lookup, error) {
 	if json.Unmarshal(raw, &typed) != nil || json.Unmarshal(raw, &m) != nil || typed.TMDBID == 0 {
 		return nil, fmt.Errorf("radarr: movie tmdb:%d not found", tmdbID)
 	}
+	libraryID := typed.ID
+	if libraryID == 0 {
+		// Radarr 6 leaves the library id out of a lookup.
+		if libraryID, err = r.libraryID(ctx, tmdbID); err != nil {
+			return nil, err
+		}
+	}
 	rt := typed.Ratings
 	ratings := Ratings{RottenTomatoes: percent(rt.RottenTomatoes.Value), Metacritic: percent(rt.Metacritic.Value)}
 	if rt.IMDB.Value > 0 {
 		ratings.IMDB, ratings.IMDBVotes = rt.IMDB.Value, rt.IMDB.Votes
 	}
-	return &Lookup{LibraryID: typed.ID, Title: typed.Title, Year: typed.Year, TMDBID: typed.TMDBID, Ratings: ratings, Raw: m}, nil
+	return &Lookup{LibraryID: libraryID, Title: typed.Title, Year: typed.Year, TMDBID: typed.TMDBID,
+		OriginalLanguage: typed.OriginalLanguage.ID, Ratings: ratings, Raw: m}, nil
+}
+
+// libraryID is the Radarr id of the library movie with a TMDB id, 0 when there is none.
+func (r *Radarr) libraryID(ctx context.Context, tmdbID int) (int, error) {
+	var ms []struct {
+		ID     int `json:"id"`
+		TMDBID int `json:"tmdbId"`
+	}
+	if err := r.c.get(ctx, "/api/v3/movie", url.Values{"tmdbId": {strconv.Itoa(tmdbID)}}, &ms); err != nil {
+		return 0, err
+	}
+	// Match the id, in case a Radarr ignores the filter and lists every movie.
+	for _, m := range ms {
+		if m.TMDBID == tmdbID {
+			return m.ID, nil
+		}
+	}
+	return 0, nil
 }
 
 // percent rounds a 0-100 rating; anything outside that range is unknown.
@@ -180,7 +213,7 @@ func (r *Radarr) Add(ctx context.Context, l *Lookup, o AddOptions) (Added, error
 
 	var res added
 	if err := r.c.post(ctx, "/api/v3/movie", body, &res); err != nil {
-		return Added{}, err
+		return Added{}, alreadyAdded(err)
 	}
 	return Added{ID: res.ID, Title: res.Title}, nil
 }

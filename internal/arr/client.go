@@ -8,10 +8,14 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/leandervdo/proposarr/internal/httpjson"
 )
+
+// ErrAlreadyAdded is an add the app refused because the title is already in its library.
+var ErrAlreadyAdded = errors.New("already added")
 
 // APIError is a *arr error response with its validation messages extracted.
 type APIError struct {
@@ -54,6 +58,10 @@ func (c client) post(ctx context.Context, path string, body, out any) error {
 	return c.wrap(c.hc.Post(ctx, path, body, out))
 }
 
+func (c client) put(ctx context.Context, path string, body, out any) error {
+	return c.wrap(c.hc.Do(ctx, http.MethodPut, path, nil, body, out))
+}
+
 func (c client) status(ctx context.Context) (SystemStatus, error) {
 	var s SystemStatus
 	err := c.get(ctx, "/api/v3/system/status", nil, &s)
@@ -81,6 +89,15 @@ func (c client) wrap(err error) error {
 		return fmt.Errorf("%s: %w", c.app, err)
 	}
 	return &APIError{App: c.app, Messages: validationMessages(se.Body), Err: se}
+}
+
+// alreadyAdded marks an add rejected with "This movie/series has already been added" as ErrAlreadyAdded.
+func alreadyAdded(err error) error {
+	var ae *APIError
+	if errors.As(err, &ae) && slices.ContainsFunc(ae.Messages, func(m string) bool { return strings.Contains(m, "already been added") }) {
+		return fmt.Errorf("%w: %w", ErrAlreadyAdded, err)
+	}
+	return err
 }
 
 var errorMessageRE = regexp.MustCompile(`"errorMessage"\s*:\s*"((?:[^"\\]|\\.)*)"`)

@@ -1,6 +1,7 @@
 package request
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"strings"
@@ -37,6 +38,8 @@ type fakeChooser struct {
 	err          error
 	qualityAsked []Item
 	folderAsked  int
+	fallback     Fallback
+	fallbackAsk  int
 }
 
 func (c *fakeChooser) ChooseQualityProfile(_ context.Context, item Item, _ string, _ []arr.QualityProfile) (arr.QualityProfile, error) {
@@ -46,6 +49,10 @@ func (c *fakeChooser) ChooseQualityProfile(_ context.Context, item Item, _ strin
 func (c *fakeChooser) ChooseRootFolder(context.Context, Item, string, []arr.RootFolder) (arr.RootFolder, error) {
 	c.folderAsked++
 	return c.folder, nil
+}
+func (c *fakeChooser) ChooseFallback(context.Context, Item, arr.QualityProfile) (Fallback, error) {
+	c.fallbackAsk++
+	return cmp.Or(c.fallback, FallbackWait), nil
 }
 
 type fakeTVDB map[int]int

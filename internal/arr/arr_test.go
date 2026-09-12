@@ -113,9 +113,20 @@ func TestRadarrLookup(t *testing.T) {
 					"rottenTomatoes":{"votes":0,"value":83,"type":"user"},"trakt":{"votes":80000,"value":8.5,"type":"user"}}}`)
 			case "11":
 				io.WriteString(w, `{"id":42,"title":"Owned","year":2019,"tmdbId":11,"ratings":{"imdb":{"votes":0,"value":0},"metacritic":{"votes":0,"value":0},"rottenTomatoes":{"votes":0,"value":0}}}`)
+			case "120":
+				// Radarr 6 leaves the id out, even for a movie in the library.
+				io.WriteString(w, `{"title":"The Fellowship of the Ring","year":2001,"tmdbId":120,"originalLanguage":{"id":1,"name":"English"}}`)
 			default:
 				http.NotFound(w, r)
 			}
+		},
+		"GET /api/v3/movie": func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("tmdbId") == "120" {
+				// A Radarr that ignores the filter lists other movies too.
+				io.WriteString(w, `[{"id":37,"tmdbId":121},{"id":38,"tmdbId":120}]`)
+				return
+			}
+			io.WriteString(w, `[]`)
 		},
 	})
 	r := NewRadarr(srv.URL, key, nil)
@@ -133,6 +144,9 @@ func TestRadarrLookup(t *testing.T) {
 	}
 	if l, err = r.Lookup(ctx, 11); err != nil || l.LibraryID != 42 || l.Ratings != (Ratings{}) {
 		t.Fatalf("in-library lookup = %+v, %v", l, err)
+	}
+	if l, err = r.Lookup(ctx, 120); err != nil || l.LibraryID != 38 || l.OriginalLanguage != 1 {
+		t.Fatalf("in-library lookup without id = %+v, %v", l, err)
 	}
 	if _, err = r.Lookup(ctx, 99); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("missing lookup err = %v", err)

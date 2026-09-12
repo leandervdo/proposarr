@@ -171,6 +171,24 @@ func (f *fakeStore) RecordRequest(_ context.Context, r store.Request) error {
 	return nil
 }
 
+func (f *fakeStore) UpdateRequestRelease(_ context.Context, pickID int64, qualityProfile string, release json.RawMessage) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.requests) - 1; i >= 0; i-- {
+		if f.requests[i].PickID != pickID {
+			continue
+		}
+		f.requests[i].QualityProfile, f.requests[i].Release = qualityProfile, release
+		if p, ok := f.picks[pickID]; ok {
+			req := f.requests[i]
+			p.Request = &req
+			f.picks[pickID] = p
+		}
+		return nil
+	}
+	return store.ErrNotFound
+}
+
 func (f *fakeStore) Excluded(context.Context, media.Kind) (map[int]bool, error) { return nil, nil }
 func (f *fakeStore) Close() error                                               { return nil }
 
@@ -206,10 +224,47 @@ func (c fakeCatalog) RootFolders(context.Context) ([]arr.RootFolder, error) { re
 
 // fakeAdder behaves like request.Requester towards its chooser.
 type fakeAdder struct {
-	mu      sync.Mutex
-	calls   int
-	err     error
-	catalog fakeCatalog
+	mu        sync.Mutex
+	calls     int
+	err       error
+	catalog   fakeCatalog
+	release   *request.ReleaseCheck // what Follow reports; nil: adds are not followed
+	block     chan struct{}         // Follow waits for it when set
+	fallback  request.Fallback
+	switched  [][2]int // movie id, profile id
+	switchErr error
+}
+
+// follow returns a Follow reporting release, under a.mu.
+func (a *fakeAdder) follow() func(context.Context) request.ReleaseCheck {
+	if a.release == nil {
+		return nil
+	}
+	c, block := *a.release, a.block
+	return func(ctx context.Context) request.ReleaseCheck {
+		if block != nil {
+			select {
+			case <-block:
+			case <-ctx.Done():
+			}
+		}
+		return c
+	}
+}
+
+func (a *fakeAdder) SwitchProfile(_ context.Context, item request.Item, movieID, profileID int) (request.Result, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.switched = append(a.switched, [2]int{movieID, profileID})
+	if a.switchErr != nil {
+		return request.Result{}, a.switchErr
+	}
+	for _, p := range a.catalog.profiles {
+		if p.ID == profileID {
+			return request.Result{App: "Radarr", ID: movieID, Title: item.Title, QualityProfile: p.Name, Follow: a.follow()}, nil
+		}
+	}
+	return request.Result{}, fmt.Errorf("Radarr quality profile %d: %w", profileID, request.ErrUnknownProfile)
 }
 
 func (a *fakeAdder) Add(ctx context.Context, item request.Item, ch request.Chooser) (request.Result, error) {
@@ -229,7 +284,14 @@ func (a *fakeAdder) Add(ctx context.Context, item request.Item, ch request.Choos
 			return request.Result{}, err
 		}
 	}
-	return request.Result{App: "Radarr", ID: 42, Title: item.Title, QualityProfile: qp.Name, RootFolder: folder.Path}, nil
+	fallback, err := ch.ChooseFallback(ctx, item, qp)
+	if err != nil {
+		return request.Result{}, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.fallback = fallback
+	return request.Result{App: "Radarr", ID: 42, Title: item.Title, QualityProfile: qp.Name, RootFolder: folder.Path, Follow: a.follow()}, nil
 }
 
 var testCatalog = fakeCatalog{

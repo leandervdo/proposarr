@@ -1,5 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { settleRelease } from "@/lib/releases";
 import { subscribe } from "./events";
 import { applyPick, keys } from "./queries";
 import type { Kind, Run } from "./types";
@@ -60,6 +61,7 @@ export function LiveProvider({ children }: { children: ReactNode }) {
             break;
           case "pick.updated":
             applyPick(qc, e.data);
+            settleRelease(e.data);
             break;
         }
       }, setConnected),

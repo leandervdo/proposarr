@@ -10,11 +10,14 @@ import type {
   AppConfig,
   AppOptions,
   CheckResult,
+  IfNothingFits,
   Kind,
   Library,
   LibraryTitle,
   Pick,
   Profile,
+  ReleaseCheck,
+  ReleaseInfo,
   Run,
   Service,
   SettingField,
@@ -724,6 +727,41 @@ const options: Record<"radarr" | "sonarr", AppOptions> = {
   },
 };
 
+/** Radarr's search after adding, with releases from a real search for Children of Men (2006) renamed to the pick. 2160p profiles find nothing that fits. */
+function releaseCheck(pick: Pick, profile: string, ifNothingFits: IfNothingFits): ReleaseCheck {
+  const name = `${pick.title.replace(/[^\p{L}\p{N}]+/gu, " ").trim()} ${pick.year ?? ""}`.trim();
+  const remux: ReleaseInfo = {
+    title: `${name} BluRay 1080p DTS-HD MA 5 1 AVC REMUX-FraMeSToR`, quality: "Remux-1080p", size: 32.4e9,
+    indexer: "TorrentLeech (Prowlarr)", protocol: "torrent", seeders: 249,
+  };
+  const bluray: ReleaseInfo = {
+    title: `${name} Bluray 1080p DTS-HD x264-Grym`, quality: "Bluray-1080p", size: 15.8e9,
+    indexer: "TorrentLeech (Prowlarr)", protocol: "torrent", seeders: 22,
+  };
+  const qualities = [{ quality: "BR-DISK", count: 6 }, { quality: "Remux-1080p", count: 6 }, { quality: "Bluray-1080p", count: 2 }];
+  if (!profile.includes("2160p")) {
+    return { status: "grabbed", profile, release: profile.startsWith("HD Bluray") ? bluray : remux, found: 0, qualities: [], alternatives: [] };
+  }
+  if (ifNothingFits === "switch") {
+    return { status: "grabbed", profile: "Remux + WEB 1080p", switched_from: profile, release: remux, found: 0, qualities: [], alternatives: [] };
+  }
+  return {
+    status: "waiting", profile, found: 14, qualities,
+    alternatives: [{ id: 6, name: "Remux + WEB 1080p", count: 5, best: remux }, { id: 4, name: "HD Bluray + WEB", count: 1, best: bluray }],
+  };
+}
+
+const checking = (profile: string): ReleaseCheck => ({ status: "checking", profile, found: 0, qualities: [], alternatives: [] });
+
+/** Like the server: follows Radarr's search in the background, then stores the result and sends pick.updated. */
+function finishCheck(pick: Pick, result: () => ReleaseCheck) {
+  setTimeout(() => {
+    const release = result();
+    pick.request = { ...pick.request!, quality_profile: release.profile, release };
+    emit({ type: "pick.updated", data: { ...pick } });
+  }, 2500);
+}
+
 function latestSucceeded(kind: Kind): Run | undefined {
   return [...runs].reverse().find((r) => r.kind === kind && r.status === "succeeded");
 }
@@ -919,11 +957,28 @@ async function route(method: string, path: string, body: unknown, headers: Heade
   if (parts[1] === "apps" && parts[3] === "options") {
     return options[parts[2] as "radarr" | "sonarr"];
   }
+  if (parts[1] === "picks" && parts[3] === "request" && parts[4] === "profile" && method === "POST") {
+    const pick = picks.find((p) => p.id === Number(parts[2]));
+    if (!pick) throw new ApiError(404, "pick not found");
+    if (pick.kind === "series") throw new ApiError(400, "switching the quality profile after a search is only for movies");
+    const profile = options.radarr.quality_profiles.find((p) => p.id === (body as { quality_profile_id?: number }).quality_profile_id);
+    if (!profile) throw new ApiError(400, "quality_profile_id is required: choose a quality profile for this title");
+    if (pick.request?.status !== "added") throw new ApiError(409, `${pick.title} has not been added to Radarr`);
+    if (pick.request.release?.status === "checking") throw new ApiError(409, `${pick.title} is still being checked`);
+    pick.request = { ...pick.request, quality_profile: profile.name, release: checking(profile.name) };
+    // Never switches again on its own; the offered alternatives always grab.
+    finishCheck(pick, () => releaseCheck(pick, profile.name, "wait"));
+    emit({ type: "pick.updated", data: { ...pick } });
+    return { ...pick };
+  }
   if (parts[1] === "picks" && parts[3] === "request" && method === "POST") {
     await wait(700);
     const pick = picks.find((p) => p.id === Number(parts[2]));
     if (!pick) throw new ApiError(404, "pick not found");
-    const { quality_profile_id, root_folder } = body as { quality_profile_id?: number; root_folder?: string };
+    const { quality_profile_id, root_folder, if_nothing_fits = "wait" } = body as { quality_profile_id?: number; root_folder?: string; if_nothing_fits?: string };
+    if (if_nothing_fits !== "switch" && if_nothing_fits !== "wait") {
+      throw new ApiError(400, `if_nothing_fits must be "switch" or "wait", not "${if_nothing_fits}"`);
+    }
     const app = pick.kind === "series" ? "sonarr" : "radarr";
     const profile = options[app].quality_profiles.find((p) => p.id === quality_profile_id);
     if (!profile) throw new ApiError(400, "quality_profile_id is required: choose a quality profile for this title");
@@ -935,7 +990,9 @@ async function route(method: string, path: string, body: unknown, headers: Heade
     pick.request = {
       pick_id: pick.id, app, target_id: 900 + pick.id, quality_profile: profile.name,
       root_folder: root_folder ?? options[app].root_folders[0]!.path, status: "added", requested_at: new Date().toISOString(),
+      release: app === "radarr" ? checking(profile.name) : undefined,
     };
+    if (app === "radarr") finishCheck(pick, () => releaseCheck(pick, profile.name, if_nothing_fits));
     emit({ type: "pick.updated", data: { ...pick } });
     return { ...pick };
   }

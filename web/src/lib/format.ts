@@ -95,6 +95,14 @@ export function gigabytes(bytes: number): string {
   return gb >= 1024 ? `${(gb / 1024).toFixed(1)} TB free` : `${Math.round(gb)} GB free`;
 }
 
+/** 32.4e9 → "32.4 GB" */
+export function fileSize(bytes?: number): string {
+  if (!bytes) return "";
+  if (bytes >= 1e12) return `${(bytes / 1e12).toFixed(1)} TB`;
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  return `${Math.max(1, Math.round(bytes / 1e6))} MB`;
+}
+
 export function appFor(kind: Kind): App {
   return kind === "series" ? "sonarr" : "radarr";
 }

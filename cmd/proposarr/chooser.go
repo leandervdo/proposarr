@@ -65,6 +65,18 @@ func (t *terminalChooser) ChooseRootFolder(ctx context.Context, item request.Ite
 	return folders[i], nil
 }
 
+// ChooseFallback asks what to do when Radarr finds releases but none fit the
+// profile. Enter switches, like the web UI's suggestion.
+func (t *terminalChooser) ChooseFallback(ctx context.Context, item request.Item, profile arr.QualityProfile) (request.Fallback, error) {
+	names := []string{string(request.FallbackSwitch), string(request.FallbackWait)}
+	labels := []string{"switch to the best quality profile that finds it", "keep waiting for " + profile.Name}
+	i, err := t.choose(ctx, fmt.Sprintf("If nothing fits %s for %s:", profile.Name, item.Label()), names, labels, 0)
+	if err != nil {
+		return "", err
+	}
+	return request.Fallback(names[i]), nil
+}
+
 // choose lists labels and reads a number or a name until one is valid.
 // def < 0 means there is no Enter default.
 func (t *terminalChooser) choose(ctx context.Context, header string, names, labels []string, def int) (int, error) {

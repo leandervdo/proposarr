@@ -8,7 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { useCallback, useSyncExternalStore } from "react";
 import { ApiError, api, type PicksPage, type PicksQuery } from "./client";
-import type { App, Kind, Library, LibraryTitle, Pick, Service, SettingValues, Verdict } from "./types";
+import type { App, IfNothingFits, Kind, Library, LibraryTitle, Pick, Service, SettingValues, Verdict } from "./types";
 
 export const keys = {
   status: ["status"] as const,
@@ -106,10 +106,10 @@ export function useSetVerdict() {
 export function useRequestPick() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ pick, qualityProfileId, rootFolder }: { pick: Pick; qualityProfileId: number; rootFolder?: string }) =>
-      api.requestPick(pick.id, qualityProfileId, rootFolder),
-    onSuccess: (pick) => {
-      applyPick(qc, pick);
+    mutationFn: ({ pick, qualityProfileId, rootFolder, ifNothingFits }: { pick: Pick; qualityProfileId: number; rootFolder?: string; ifNothingFits?: IfNothingFits }) =>
+      api.requestPick(pick.id, qualityProfileId, rootFolder, ifNothingFits),
+    onSuccess: (updated, { pick }) => {
+      applyPick(qc, updated);
       void qc.invalidateQueries({ queryKey: ["library"] });
       // A new request joins the Collection's Added list; the title is now in the library.
       void qc.invalidateQueries({ queryKey: ["picks", "pages"] });
@@ -183,4 +183,13 @@ export function useCachedLibraryTitle(kind: Kind | undefined, tmdbId: number | u
   const qc = useQueryClient();
   if (!kind || tmdbId === undefined) return undefined;
   return qc.getQueryData<Library>(keys.library(kind))?.titles?.find((t) => t.tmdb_id === tmdbId);
+}
+
+/** Moves an added movie to another quality profile; Radarr searches again and the check restarts. */
+export function useSwitchProfile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ pick, qualityProfileId }: { pick: Pick; qualityProfileId: number }) => api.switchProfile(pick.id, qualityProfileId),
+    onSuccess: (updated) => applyPick(qc, updated),
+  });
 }

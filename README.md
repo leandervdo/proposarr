@@ -121,6 +121,12 @@ Proposarr never adds a title with a default quality profile. Every add asks whic
 
 If the app has several root folders and none is configured (`--root-folder`, or `root_folder` in the config), you are asked for the root folder too.
 
+### When nothing fits the profile
+
+Radarr searches and grabs as usual; Proposarr never grabs a release itself. After adding a movie, Proposarr follows Radarr's search and shows what happened: the release Radarr grabbed, a release held for a delay profile, or that the movie isn't released yet. When Radarr grabs nothing, Proposarr runs one interactive search in Radarr to show what your indexers have and which of your other quality profiles would grab a release now.
+
+Every movie you add also asks what to do then, per title: switch to the best quality profile that finds a release (Proposarr changes the profile in Radarr and has Radarr search again, once), or keep waiting. The web UI suggests switching and lets you switch later from the title. `proposarr add` and `proposarr run --add` ask too; with `--quality-profile`, pass `--if-nothing-fits switch` or `wait` (default `wait`).
+
 ## How a run works
 
 1. **Snapshot.** Read the Sonarr or Radarr library, cached for six hours.

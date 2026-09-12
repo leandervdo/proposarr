@@ -15,7 +15,9 @@ import (
 
 var (
 	ErrAlreadyInLibrary = errors.New("already in library")
+	ErrNotInLibrary     = errors.New("not in library")
 	ErrNotConfigured    = errors.New("not configured")
+	ErrUnknownProfile   = errors.New("unknown quality profile")
 	ErrCancelled        = errors.New("cancelled")
 )
 
@@ -44,11 +46,16 @@ type TVDBResolver interface {
 type Chooser interface {
 	ChooseQualityProfile(ctx context.Context, item Item, app string, profiles []arr.QualityProfile) (arr.QualityProfile, error)
 	ChooseRootFolder(ctx context.Context, item Item, app string, folders []arr.RootFolder) (arr.RootFolder, error)
+	// ChooseFallback is asked for movies whose search Proposarr follows.
+	ChooseFallback(ctx context.Context, item Item, profile arr.QualityProfile) (Fallback, error)
 }
 
 type Requester struct {
-	Radarr, Sonarr                     Target
-	TMDB                               TVDBResolver
+	Radarr, Sonarr Target
+	TMDB           TVDBResolver
+	// RadarrSearch, when set, lets Result.Follow follow the search Radarr runs
+	// for a new movie.
+	RadarrSearch                       Searcher
 	RadarrRootFolder, SonarrRootFolder string
 	MinimumAvailability                string
 }
@@ -59,10 +66,15 @@ type Result struct {
 	Title          string
 	QualityProfile string
 	RootFolder     string
+	// Follow, set for movies added with RadarrSearch, waits for Radarr's search
+	// and reports what it did. It can take about a minute, so callers may run it
+	// in the background; the check's Profile is the movie's profile by then.
+	Follow func(ctx context.Context) ReleaseCheck
 }
 
 // Add looks the title up, asks ch for a quality profile (and a root folder when
-// it is ambiguous), then adds it with a search.
+// it is ambiguous), then adds it with the app's own search. For a movie with
+// RadarrSearch set it also asks what to do when nothing fits; see Result.Follow.
 func (r *Requester) Add(ctx context.Context, item Item, ch Chooser) (Result, error) {
 	if ch == nil {
 		return Result{}, errors.New("a quality profile must be chosen for every title: no chooser given")
@@ -130,11 +142,22 @@ func (r *Requester) Add(ctx context.Context, item Item, ch Chooser) (Result, err
 		return Result{}, err
 	}
 
+	follow := item.Kind != media.Series && r.RadarrSearch != nil
+	fallback := FallbackWait
+	if follow {
+		if fallback, err = ch.ChooseFallback(ctx, item, qp); err != nil {
+			return Result{}, err
+		}
+	}
+
 	opts := arr.AddOptions{QualityProfileID: qp.ID, RootFolderPath: folder.Path, Search: true}
 	if item.Kind != media.Series {
 		opts.MinimumAvailability = r.MinimumAvailability
 	}
 	added, err := target.Add(ctx, l, opts)
+	if errors.Is(err, arr.ErrAlreadyAdded) {
+		return Result{}, fmt.Errorf("%s: %w", item.Label(), ErrAlreadyInLibrary)
+	}
 	if err != nil {
 		return Result{}, fmt.Errorf("%s add %s: %w", app, item.Label(), err)
 	}
@@ -142,7 +165,13 @@ func (r *Requester) Add(ctx context.Context, item Item, ch Chooser) (Result, err
 	if title == "" {
 		title = item.Title
 	}
-	return Result{App: app, ID: added.ID, Title: title, QualityProfile: qp.Name, RootFolder: folder.Path}, nil
+	res := Result{App: app, ID: added.ID, Title: title, QualityProfile: qp.Name, RootFolder: folder.Path}
+	if follow {
+		res.Follow = func(ctx context.Context) ReleaseCheck {
+			return r.followNewMovie(ctx, added.ID, qp, profiles, fallback)
+		}
+	}
+	return res, nil
 }
 
 func pickRootFolder(ctx context.Context, item Item, app, configured string, folders []arr.RootFolder, ch Chooser) (arr.RootFolder, error) {
@@ -191,8 +220,9 @@ func folderPaths(folders []arr.RootFolder) string {
 
 // FixedChooser answers from flags, for adding one scripted title.
 type FixedChooser struct {
-	QualityProfile string // name (case-insensitive) or numeric id
-	RootFolder     string // exact path
+	QualityProfile string   // name (case-insensitive) or numeric id
+	RootFolder     string   // exact path
+	Fallback       Fallback // empty means FallbackWait
 }
 
 func (f FixedChooser) ChooseQualityProfile(_ context.Context, item Item, app string, profiles []arr.QualityProfile) (arr.QualityProfile, error) {
@@ -229,4 +259,8 @@ func (f FixedChooser) ChooseRootFolder(_ context.Context, item Item, app string,
 		}
 	}
 	return arr.RootFolder{}, fmt.Errorf("%s has no root folder %q (have %s)", app, f.RootFolder, folderPaths(folders))
+}
+
+func (f FixedChooser) ChooseFallback(context.Context, Item, arr.QualityProfile) (Fallback, error) {
+	return ParseFallback(string(f.Fallback))
 }

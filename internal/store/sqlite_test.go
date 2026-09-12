@@ -116,7 +116,7 @@ func TestMigrateFromV2(t *testing.T) {
 	}
 	defer s.Close()
 	var version int
-	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != 3 {
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil || version != len(migrations) {
 		t.Fatalf("version = %d, %v", version, err)
 	}
 	old, picks, err := s.GetRun(ctx, 1)

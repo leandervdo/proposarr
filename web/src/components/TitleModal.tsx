@@ -470,6 +470,12 @@ function ActionBar({
           )}
         </div>
       )}
+      {/* Radarr grabbed nothing but another profile would: the accept dialog opens on that choice. */}
+      {pick && added && request?.release?.status === "waiting" && request.release.alternatives.length > 0 && (
+        <Button variant="primary" className="sm:ml-auto" onClick={() => onAdd(pick)}>
+          Switch profile
+        </Button>
+      )}
     </footer>
   );
 }

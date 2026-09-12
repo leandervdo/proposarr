@@ -3,6 +3,7 @@ import type {
   App,
   AppOptions,
   CheckResult,
+  IfNothingFits,
   Kind,
   Library,
   Pick,
@@ -138,8 +139,14 @@ export const api = {
   setVerdict: (id: number, verdict: Verdict | "", laterDays?: number) =>
     request<Pick>("POST", `/api/picks/${id}/verdict`, laterDays ? { verdict, later_days: laterDays } : { verdict }),
   appOptions: (app: App) => request<AppOptions>("GET", `/api/apps/${app}/options`),
-  requestPick: (id: number, qualityProfileId: number, rootFolder?: string) =>
-    request<Pick>("POST", `/api/picks/${id}/request`, rootFolder ? { quality_profile_id: qualityProfileId, root_folder: rootFolder } : { quality_profile_id: qualityProfileId }),
+  requestPick: (id: number, qualityProfileId: number, rootFolder?: string, ifNothingFits?: IfNothingFits) =>
+    request<Pick>("POST", `/api/picks/${id}/request`, {
+      quality_profile_id: qualityProfileId,
+      root_folder: rootFolder || undefined,
+      if_nothing_fits: ifNothingFits,
+    }),
+  switchProfile: (id: number, qualityProfileId: number) =>
+    request<Pick>("POST", `/api/picks/${id}/request/profile`, { quality_profile_id: qualityProfileId }),
   library: (kind: Kind) => request<Library>("GET", `/api/library?kind=${kind}`),
   settings: () => request<Settings>("GET", "/api/settings"),
   saveSettings: (values: SettingValues) => request<Settings>("PUT", "/api/settings", { values }),
