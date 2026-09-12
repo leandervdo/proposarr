@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,7 +34,7 @@ type Fallback string
 
 const (
 	FallbackWait   Fallback = "wait"   // keep the profile; Radarr grabs a release once one fits
-	FallbackSwitch Fallback = "switch" // switch to the best profile that would grab a release, and search again
+	FallbackSwitch Fallback = "switch" // switch to the highest profile ranked below that would grab a release, and search again
 )
 
 // ParseFallback reads a fallback; empty means FallbackWait.
@@ -67,7 +68,7 @@ type ReleaseCheck struct {
 	Release      *ReleaseInfo    `json:"release,omitempty"`
 	Found        int             `json:"found"`        // waiting: releases the explaining search found
 	Qualities    []QualityCount  `json:"qualities"`    // waiting: what was found, most common first
-	Alternatives []ProfileOption `json:"alternatives"` // waiting: other profiles that would grab a release now, best first
+	Alternatives []ProfileOption `json:"alternatives"` // waiting: other profiles that would grab a release now, in ranking order
 	Error        string          `json:"error,omitempty"`
 }
 
@@ -107,7 +108,8 @@ var (
 
 // followNewMovie reports the search Radarr runs after adding a movie. When
 // nothing fits the profile and fallback is FallbackSwitch, it switches once to
-// the best profile that would grab a release and has Radarr search again.
+// the highest-ranked profile below it that would grab a release, and has Radarr
+// search again.
 func (r *Requester) followNewMovie(ctx context.Context, movieID int, profile arr.QualityProfile, profiles []arr.QualityProfile, fallback Fallback) ReleaseCheck {
 	// Radarr queues this search itself, after refreshing the new movie.
 	find := func(ctx context.Context) (arr.Command, bool, error) {
@@ -118,10 +120,13 @@ func (r *Requester) followNewMovie(ctx context.Context, movieID int, profile arr
 		return cmds[0], true, nil
 	}
 	check := r.followSearch(ctx, movieID, 0, profile, profiles, find)
-	if fallback != FallbackSwitch || check.Status != CheckWaiting || len(check.Alternatives) == 0 {
+	if fallback != FallbackSwitch || check.Status != CheckWaiting {
 		return check
 	}
-	best := check.Alternatives[0]
+	best, ok := fallbackChoice(check.Alternatives, rankedIDs(r.ProfileOrder, profiles), profile.ID)
+	if !ok {
+		return check
+	}
 	i := slices.IndexFunc(profiles, func(p arr.QualityProfile) bool { return p.ID == best.ID })
 	follow, err := r.startSwitch(ctx, movieID, profiles[i], profiles)
 	if err != nil {
@@ -214,7 +219,7 @@ func (r *Requester) followSearch(ctx context.Context, movieID, grabsBefore int, 
 	}
 	check.Status = CheckWaiting
 	check.Found, check.Qualities = len(rels), countQualities(rels)
-	check.Alternatives = Alternatives(rels, profiles, profile.ID, movie.OriginalLanguage)
+	check.Alternatives = orderAlternatives(Alternatives(rels, profiles, profile.ID, movie.OriginalLanguage), rankedIDs(r.ProfileOrder, profiles))
 	return check
 }
 
@@ -285,8 +290,7 @@ var profileRejections = []string{"not wanted in profile", "profile minimum", "wa
 // the custom format score must reach the profile's minimum and the language
 // must fit. A rejection that does not depend on the profile (seeders, size,
 // availability, an unparsable title) rules a release out for every profile.
-// Profiles without rules are skipped. The best option comes first: the highest
-// quality a profile would grab, then the most releases.
+// Profiles without rules are skipped; the result keeps the order of profiles.
 func Alternatives(rels []arr.Release, profiles []arr.QualityProfile, currentID, originalLanguage int) []ProfileOption {
 	type candidate struct {
 		rel         arr.Release
@@ -323,9 +327,6 @@ func Alternatives(rels []arr.Release, profiles []arr.QualityProfile, currentID, 
 			opts = append(opts, o)
 		}
 	}
-	slices.SortStableFunc(opts, func(a, b option) int {
-		return cmp.Or(compareQuality(b.top.rel, a.top.rel), cmp.Compare(b.Count, a.Count))
-	})
 	out := make([]ProfileOption, len(opts))
 	for i, o := range opts {
 		out[i] = o.ProfileOption
@@ -333,25 +334,66 @@ func Alternatives(rels []arr.Release, profiles []arr.QualityProfile, currentID, 
 	return out
 }
 
-// compareQuality orders releases of different profiles by resolution, then source.
-func compareQuality(a, b arr.Release) int {
-	return cmp.Or(cmp.Compare(a.Resolution, b.Resolution), cmp.Compare(sourceRank(a), sourceRank(b)))
+// ParseProfileList splits a comma-separated list of quality profile names or ids.
+func ParseProfileList(s string) []string {
+	var out []string
+	for _, e := range strings.Split(s, ",") {
+		if e = strings.TrimSpace(e); e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
-func sourceRank(r arr.Release) int {
-	switch {
-	case r.Modifier == "remux" || r.Modifier == "brdisk":
-		return 5
-	case r.Source == "bluray":
-		return 4
-	case r.Source == "webdl":
-		return 3
-	case r.Source == "webrip":
-		return 2
-	case r.Source == "tv":
-		return 1
+// rankedIDs resolves the profile ranking, by id or case-insensitive name, to
+// profile ids, best first. Unknown entries are skipped.
+func rankedIDs(entries []string, profiles []arr.QualityProfile) []int {
+	var ids []int
+	for _, e := range entries {
+		i := slices.IndexFunc(profiles, func(p arr.QualityProfile) bool {
+			return strconv.Itoa(p.ID) == e || strings.EqualFold(p.Name, e)
+		})
+		if i >= 0 && !slices.Contains(ids, profiles[i].ID) {
+			ids = append(ids, profiles[i].ID)
+		}
 	}
-	return 0
+	return ids
+}
+
+// orderAlternatives puts ranked profiles first, in ranking order; unranked
+// profiles follow in Radarr's order.
+func orderAlternatives(alts []ProfileOption, ranking []int) []ProfileOption {
+	rank := func(o ProfileOption) int {
+		if i := slices.Index(ranking, o.ID); i >= 0 {
+			return i
+		}
+		return len(ranking)
+	}
+	slices.SortStableFunc(alts, func(a, b ProfileOption) int { return cmp.Compare(rank(a), rank(b)) })
+	return alts
+}
+
+// hasLowerRanked reports whether a movie with profileID could fall back: the
+// profile is ranked, with profiles below it.
+func hasLowerRanked(ranking []int, profileID int) bool {
+	i := slices.Index(ranking, profileID)
+	return i >= 0 && i < len(ranking)-1
+}
+
+// fallbackChoice is the profile a movie with currentID falls back to: the
+// highest-ranked profile below it that would grab a release. alts must be in
+// ranking order. A higher-ranked or unranked profile is never chosen.
+func fallbackChoice(alts []ProfileOption, ranking []int, currentID int) (ProfileOption, bool) {
+	cur := slices.Index(ranking, currentID)
+	if cur < 0 {
+		return ProfileOption{}, false
+	}
+	for _, o := range alts {
+		if slices.Index(ranking, o.ID) > cur {
+			return o, true
+		}
+	}
+	return ProfileOption{}, false
 }
 
 func onlyProfileRejections(rel arr.Release) bool {

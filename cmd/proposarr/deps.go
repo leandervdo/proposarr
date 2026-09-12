@@ -165,6 +165,7 @@ func (d *deps) requester() *request.Requester {
 		RadarrRootFolder:    d.cfg.Radarr.RootFolder,
 		SonarrRootFolder:    d.cfg.Sonarr.RootFolder,
 		MinimumAvailability: d.cfg.Radarr.MinimumAvailability,
+		ProfileOrder:        request.ParseProfileList(d.cfg.Radarr.ProfileOrder),
 	}
 	if d.radarr != nil {
 		r.Radarr = d.radarr

@@ -69,6 +69,7 @@ The listen address, data directory, `claude` binary path and web login can only 
 | `PROPOSARR_RADARR_URL`, `PROPOSARR_RADARR_API_KEY` | | URL required for movies. API key optional, see below |
 | `PROPOSARR_RADARR_ROOT_FOLDER` | | Optional default root folder |
 | `PROPOSARR_RADARR_MINIMUM_AVAILABILITY` | `released` | `announced`, `inCinemas` or `released` |
+| `PROPOSARR_RADARR_PROFILE_ORDER` | | Your ranking of Radarr's quality profiles, best first: names or ids, comma separated. Usually set in the web UI; see "When nothing fits the profile" |
 | `PROPOSARR_PLEX_URL`, `PROPOSARR_PLEX_TOKEN` | | Optional |
 | `PROPOSARR_JELLYFIN_URL`, `PROPOSARR_JELLYFIN_API_KEY` | | Optional |
 | `PROPOSARR_JELLYFIN_USER_ID` | | Empty merges every user |
@@ -125,7 +126,7 @@ If the app has several root folders and none is configured (`--root-folder`, or 
 
 Radarr searches and grabs as usual; Proposarr never grabs a release itself. After adding a movie, Proposarr follows Radarr's search and shows what happened: the release Radarr grabbed, a release held for a delay profile, or that the movie isn't released yet. When Radarr grabs nothing, Proposarr runs one interactive search in Radarr to show what your indexers have and which of your other quality profiles would grab a release now.
 
-Every movie you add also asks what to do then, per title: switch to the best quality profile that finds a release (Proposarr changes the profile in Radarr and has Radarr search again, once), or keep waiting. The web UI suggests switching and lets you switch later from the title. `proposarr add` and `proposarr run --add` ask too; with `--quality-profile`, pass `--if-nothing-fits switch` or `wait` (default `wait`).
+Proposarr never guesses which quality profile is better. During setup it loads your Radarr quality profiles and asks you to rank them, best first; you can change the ranking in Settings. Every movie you add then also asks what to do when nothing fits, per title: switch to the highest profile ranked below the one you chose that finds a release (Proposarr changes the profile in Radarr and has Radarr search again, once), or keep waiting. It never switches to a higher-ranked profile, and without a ranking, or when nothing is ranked below the chosen profile, it doesn't switch and doesn't ask. The web UI suggests switching and lets you switch later from the title. `proposarr add` and `proposarr run --add` ask too; with `--quality-profile`, pass `--if-nothing-fits switch` or `wait` (default `wait`).
 
 ## How a run works
 

@@ -28,6 +28,7 @@ type publicArr struct {
 	APIKeySet           bool   `json:"api_key_set"`
 	RootFolder          string `json:"root_folder"`
 	MinimumAvailability string `json:"minimum_availability,omitempty"`
+	ProfileOrder        string `json:"profile_order,omitempty"`
 }
 
 type publicPlex struct {
@@ -76,15 +77,16 @@ func publicConfigOf(c config.Config) publicConfig {
 		DataDir:     c.DataDir,
 		HistoryDays: c.HistoryDays,
 		SnapshotTTL: c.SnapshotTTL.String(),
-		Radarr:      publicArr{URL: redactURL(c.Radarr.URL), APIKeySet: c.Radarr.APIKey != "", RootFolder: c.Radarr.RootFolder, MinimumAvailability: c.Radarr.MinimumAvailability},
-		Sonarr:      publicArr{URL: redactURL(c.Sonarr.URL), APIKeySet: c.Sonarr.APIKey != "", RootFolder: c.Sonarr.RootFolder},
-		Plex:        publicPlex{URL: redactURL(c.Plex.URL), TokenSet: c.Plex.Token != ""},
-		Jellyfin:    publicJellyfin{URL: redactURL(c.Jellyfin.URL), APIKeySet: c.Jellyfin.APIKey != "", UserID: c.Jellyfin.UserID},
-		TMDB:        publicTMDB{APIKeySet: c.TMDB.APIKey != "", Region: c.TMDB.Region},
-		Claude:      publicClaude{Bin: c.Claude.Bin, Auth: claudeAuth(c), Timeout: c.Claude.Timeout.String(), MaxBudgetUSD: c.Claude.MaxBudgetUSD},
-		Web:         publicWeb{AuthEnabled: c.Web.AuthEnabled()},
-		Movies:      kind(c.Movies),
-		Series:      kind(c.Series),
+		Radarr: publicArr{URL: redactURL(c.Radarr.URL), APIKeySet: c.Radarr.APIKey != "", RootFolder: c.Radarr.RootFolder,
+			MinimumAvailability: c.Radarr.MinimumAvailability, ProfileOrder: c.Radarr.ProfileOrder},
+		Sonarr:   publicArr{URL: redactURL(c.Sonarr.URL), APIKeySet: c.Sonarr.APIKey != "", RootFolder: c.Sonarr.RootFolder},
+		Plex:     publicPlex{URL: redactURL(c.Plex.URL), TokenSet: c.Plex.Token != ""},
+		Jellyfin: publicJellyfin{URL: redactURL(c.Jellyfin.URL), APIKeySet: c.Jellyfin.APIKey != "", UserID: c.Jellyfin.UserID},
+		TMDB:     publicTMDB{APIKeySet: c.TMDB.APIKey != "", Region: c.TMDB.Region},
+		Claude:   publicClaude{Bin: c.Claude.Bin, Auth: claudeAuth(c), Timeout: c.Claude.Timeout.String(), MaxBudgetUSD: c.Claude.MaxBudgetUSD},
+		Web:      publicWeb{AuthEnabled: c.Web.AuthEnabled()},
+		Movies:   kind(c.Movies),
+		Series:   kind(c.Series),
 	}
 }
 

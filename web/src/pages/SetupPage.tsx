@@ -1,11 +1,13 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Check, Loader2, Moon, Sun } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useState, type ReactNode } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { toast, Toaster } from "sonner";
-import { useSettings, useStartRun, useStatus } from "@/api/queries";
+import { keys, useSettings, useStartRun, useStatus } from "@/api/queries";
 import type { Service, Settings, TestResult } from "@/api/types";
 import { ErrorNote } from "@/components/EmptyState";
+import { ProfileRankingField } from "@/components/settings/ProfileRankingField";
 import { SERVICE_KEYS, SERVICE_META, ServiceFields, TestNote } from "@/components/settings/services";
 import { useServiceForm, type ServiceForm } from "@/components/settings/useServiceForm";
 import { Button } from "@/components/ui/button";
@@ -16,12 +18,23 @@ import { cn } from "@/lib/utils";
 const STEPS = [
   { id: "welcome", label: "Welcome" },
   { id: "library", label: "Library" },
+  { id: "profiles", label: "Quality ranking" },
   { id: "tmdb", label: "TMDB" },
   { id: "history", label: "Watch history" },
   { id: "claude", label: "Claude" },
   { id: "done", label: "Done" },
 ] as const;
 type StepId = (typeof STEPS)[number]["id"];
+
+const RANKING_KEYS = ["radarr.profile_order"] as const;
+
+/** The ranking step only exists once Radarr is configured. */
+function stepsFor(settings: Settings | undefined) {
+  return STEPS.filter((s) => s.id !== "profiles" || (settings !== undefined && isSet(settings, "radarr.url")));
+}
+
+/** "Step 3 of 7", for the step headings. */
+const StepCount = createContext("");
 
 const MISSING_LABEL: Record<string, string> = {
   "radarr.url or sonarr.url": "Radarr or Sonarr",
@@ -36,20 +49,31 @@ function isSet(settings: Settings, key: string) {
 
 export function SetupPage() {
   const [params, setParams] = useSearchParams();
-  const stepId = (STEPS.find((s) => s.id === params.get("step"))?.id ?? "welcome") as StepId;
-  const index = STEPS.findIndex((s) => s.id === stepId);
-  const [direction, setDirection] = useState(1);
+  const qc = useQueryClient();
   const settings = useSettings();
   const status = useStatus();
+  const steps = stepsFor(settings.data);
+  const stepId = (steps.find((s) => s.id === params.get("step"))?.id ?? "welcome") as StepId;
+  const index = steps.findIndex((s) => s.id === stepId);
+  const [direction, setDirection] = useState(1);
   const [theme, toggleTheme] = useTheme();
 
+  // Read the latest settings: saving Radarr adds the ranking step before this component re-renders.
+  const latestSteps = () => stepsFor(qc.getQueryData<Settings>(keys.settings));
   const go = (id: StepId) => {
-    setDirection(STEPS.findIndex((s) => s.id === id) >= index ? 1 : -1);
+    const list = latestSteps();
+    setDirection(list.findIndex((s) => s.id === id) >= list.findIndex((s) => s.id === stepId) ? 1 : -1);
     setParams(id === "welcome" ? {} : { step: id });
     window.scrollTo({ top: 0 });
   };
-  const next = () => go(STEPS[Math.min(index + 1, STEPS.length - 1)]!.id);
-  const back = () => go(STEPS[Math.max(index - 1, 0)]!.id);
+  const next = () => {
+    const list = latestSteps();
+    go(list[Math.min(list.findIndex((s) => s.id === stepId) + 1, list.length - 1)]!.id);
+  };
+  const back = () => {
+    const list = latestSteps();
+    go(list[Math.max(list.findIndex((s) => s.id === stepId) - 1, 0)]!.id);
+  };
 
   const missing = (status.data?.missing ?? []).map((m) => MISSING_LABEL[m] ?? m);
 
@@ -62,7 +86,7 @@ export function SetupPage() {
         </p>
         <p className="mt-2 text-sm text-text-muted">First-time setup</p>
         <ol className="mt-10 flex flex-col gap-1">
-          {STEPS.map((s, i) => {
+          {steps.map((s, i) => {
             const done = i < index;
             const current = i === index;
             return (
@@ -127,13 +151,13 @@ export function SetupPage() {
           </p>
           <div className="flex items-center gap-2">
             <span className="nums text-sm text-text-muted">
-              Step {index + 1} of {STEPS.length}
+              Step {index + 1} of {steps.length}
             </span>
             <ThemeToggle theme={theme} onToggle={toggleTheme} />
           </div>
         </div>
         <div className="h-0.5 bg-border">
-          <div className="h-full bg-accent transition-[width] duration-300" style={{ width: `${((index + 1) / STEPS.length) * 100}%` }} />
+          <div className="h-full bg-accent transition-[width] duration-300" style={{ width: `${((index + 1) / steps.length) * 100}%` }} />
         </div>
       </header>
 
@@ -144,23 +168,26 @@ export function SetupPage() {
           ) : !settings.data ? (
             <div className="h-96 animate-pulse rounded-[var(--radius-panel)] bg-surface" aria-busy />
           ) : (
-            <AnimatePresence mode="wait" initial={false} custom={direction}>
-              <motion.div
-                key={stepId}
-                custom={direction}
-                initial={{ opacity: 0, x: direction * 24 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: direction * -24 }}
-                transition={{ duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }}
-              >
-                {stepId === "welcome" && <Welcome onStart={next} />}
-                {stepId === "library" && <LibraryStep settings={settings.data} onBack={back} onNext={next} />}
-                {stepId === "tmdb" && <SingleStep service="tmdb" settings={settings.data} onBack={back} onNext={next} required="tmdb.api_key" />}
-                {stepId === "history" && <HistoryStep settings={settings.data} onBack={back} onNext={next} />}
-                {stepId === "claude" && <ClaudeStep settings={settings.data} onBack={back} onNext={next} localLogin={status.data?.claude_auth === "local" && !(status.data?.missing ?? []).some((m) => m.startsWith("claude"))} />}
-                {stepId === "done" && <Done settings={settings.data} missing={missing} onBack={back} />}
-              </motion.div>
-            </AnimatePresence>
+            <StepCount.Provider value={`Step ${index + 1} of ${steps.length}`}>
+              <AnimatePresence mode="wait" initial={false} custom={direction}>
+                <motion.div
+                  key={stepId}
+                  custom={direction}
+                  initial={{ opacity: 0, x: direction * 24 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: direction * -24 }}
+                  transition={{ duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }}
+                >
+                  {stepId === "welcome" && <Welcome onStart={next} />}
+                  {stepId === "library" && <LibraryStep settings={settings.data} onBack={back} onNext={next} />}
+                  {stepId === "profiles" && <RankingStep settings={settings.data} onBack={back} onNext={next} />}
+                  {stepId === "tmdb" && <SingleStep service="tmdb" settings={settings.data} onBack={back} onNext={next} required="tmdb.api_key" />}
+                  {stepId === "history" && <HistoryStep settings={settings.data} onBack={back} onNext={next} />}
+                  {stepId === "claude" && <ClaudeStep settings={settings.data} onBack={back} onNext={next} localLogin={status.data?.claude_auth === "local" && !(status.data?.missing ?? []).some((m) => m.startsWith("claude"))} />}
+                  {stepId === "done" && <Done settings={settings.data} missing={missing} onBack={back} />}
+                </motion.div>
+              </AnimatePresence>
+            </StepCount.Provider>
           )}
         </div>
       </main>
@@ -182,11 +209,12 @@ function ThemeToggle({ theme, onToggle }: { theme: "dark" | "light"; onToggle: (
   );
 }
 
-function StepHeading({ step, title, children }: { step?: string; title: string; children?: ReactNode }) {
+function StepHeading({ step, title, children }: { step?: boolean; title: string; children?: ReactNode }) {
+  const count = useContext(StepCount);
   return (
     <div className="mb-8">
       {/* Phones show the step count in the sticky header instead. */}
-      {step && <p className="mb-3 hidden text-sm text-text-muted lg:block">{step}</p>}
+      {step && <p className="mb-3 hidden text-sm text-text-muted lg:block">{count}</p>}
       <h1 className="font-display text-[44px] leading-[0.92] font-bold tracking-tight sm:text-[60px]">{title}</h1>
       {children && <div className="mt-4 max-w-[56ch] text-[16px] leading-relaxed text-text-muted">{children}</div>}
     </div>
@@ -264,7 +292,8 @@ function ServiceBlock({ service, form, tester, children }: { service: Service; f
         </div>
       </header>
       {children}
-      <ServiceFields service={service} form={form} />
+      {/* The ranking needs Radarr saved first, so setup asks for it in the next step. */}
+      <ServiceFields service={service} form={form} ranking={false} />
       <div className="mt-4 flex flex-col gap-3">
         <TestNote result={tester.testing === service ? null : (tester.results[service] ?? null)} testing={tester.testing === service} service={service} />
         <Button size="sm" onClick={() => void tester.run(service)} disabled={tester.testing !== null} className="self-start">
@@ -311,7 +340,7 @@ function LibraryStep({ settings, onBack, onNext }: { settings: Settings; onBack:
 
   return (
     <>
-      <StepHeading step="Step 2 of 6" title="Connect your library">
+      <StepHeading step title="Connect your library">
         Add Radarr for movies, Sonarr for series, or both. Proposarr skips what you already own and adds accepted picks there.
       </StepHeading>
       <Segmented
@@ -343,13 +372,44 @@ function LibraryStep({ settings, onBack, onNext }: { settings: Settings; onBack:
   );
 }
 
+function RankingStep({ settings, onBack, onNext }: { settings: Settings; onBack: () => void; onNext: () => void }) {
+  const form = useServiceForm(settings, RANKING_KEYS);
+  const { note, saveAndContinue } = useStepSave(form, onNext);
+  return (
+    <>
+      <StepHeading step title="Rank your quality profiles">
+        Put the profile you want most on top. When nothing fits the profile you chose for a movie, Proposarr can fall back to the ones ranked below it.
+        You can change this later under Connections.
+      </StepHeading>
+      <section className="rounded-[var(--radius-panel)] border border-border bg-surface p-5">
+        <ProfileRankingField form={form} />
+      </section>
+      <Actions onBack={onBack} note={note}>
+        <Button
+          variant="ghost"
+          size="lg"
+          onClick={() => {
+            form.reset();
+            onNext();
+          }}
+        >
+          Later
+        </Button>
+        <Button variant="primary" size="lg" disabled={form.saving || (!form.dirty && !isSet(settings, "radarr.profile_order"))} onClick={() => void saveAndContinue()}>
+          {form.saving && <Loader2 className="animate-spin" />} Save and continue
+        </Button>
+      </Actions>
+    </>
+  );
+}
+
 function SingleStep({ service, settings, onBack, onNext, required }: { service: Service; settings: Settings; onBack: () => void; onNext: () => void; required: string }) {
   const form = useServiceForm(settings, SERVICE_KEYS[service]);
   const tester = useTester(form);
   const { note, saveAndContinue } = useStepSave(form, onNext);
   return (
     <>
-      <StepHeading step="Step 3 of 6" title="Add a TMDB key">
+      <StepHeading step title="Add a TMDB key">
         TMDB supplies the candidate titles, posters and streaming availability. An account and key are free.
       </StepHeading>
       <ServiceBlock service={service} form={form} tester={tester} />
@@ -369,7 +429,7 @@ function HistoryStep({ settings, onBack, onNext }: { settings: Settings; onBack:
   const [server, setServer] = useState<"plex" | "jellyfin">(isSet(settings, "jellyfin.url") && !isSet(settings, "plex.url") ? "jellyfin" : "plex");
   return (
     <>
-      <StepHeading step="Step 4 of 6" title="Add your watch history">
+      <StepHeading step title="Add your watch history">
         What you watched, rewatched or gave up on says more about your taste than what you own. You can skip this and add it later.
       </StepHeading>
       <Segmented
@@ -409,7 +469,7 @@ function ClaudeStep({ settings, onBack, onNext, localLogin }: { settings: Settin
   const hasCredential = hasValue(form, "claude.oauth_token") || hasValue(form, "claude.api_key");
   return (
     <>
-      <StepHeading step="Step 5 of 6" title="Connect Claude">
+      <StepHeading step title="Connect Claude">
         Claude ranks the candidates against your taste and writes the reason for each pick. Use a Claude subscription through a setup token, or an
         Anthropic API key.
       </StepHeading>
@@ -451,7 +511,7 @@ function Done({ settings, missing, onBack }: { settings: Settings; missing: stri
 
   return (
     <>
-      <StepHeading step="Step 6 of 6" title={missing.length ? "Almost there" : "Ready for your first picks"}>
+      <StepHeading step title={missing.length ? "Almost there" : "Ready for your first picks"}>
         {missing.length
           ? `Proposarr still needs ${missing.join(" and ")} before it can run. Go back to add it, or finish later on the Connections page.`
           : `Your first run reads the ${kind === "movies" ? "Radarr" : "Sonarr"} library and history, then asks Claude. It takes a minute or two.`}

@@ -46,7 +46,8 @@ type TVDBResolver interface {
 type Chooser interface {
 	ChooseQualityProfile(ctx context.Context, item Item, app string, profiles []arr.QualityProfile) (arr.QualityProfile, error)
 	ChooseRootFolder(ctx context.Context, item Item, app string, folders []arr.RootFolder) (arr.RootFolder, error)
-	// ChooseFallback is asked for movies whose search Proposarr follows.
+	// ChooseFallback is asked for movies whose search Proposarr follows, when
+	// quality profiles are ranked below the chosen one.
 	ChooseFallback(ctx context.Context, item Item, profile arr.QualityProfile) (Fallback, error)
 }
 
@@ -58,6 +59,10 @@ type Requester struct {
 	RadarrSearch                       Searcher
 	RadarrRootFolder, SonarrRootFolder string
 	MinimumAvailability                string
+	// ProfileOrder is the user's ranking of Radarr's quality profiles (names or
+	// ids), best first. A movie only falls back to profiles ranked below its own;
+	// without a ranking it never falls back.
+	ProfileOrder []string
 }
 
 type Result struct {
@@ -144,7 +149,7 @@ func (r *Requester) Add(ctx context.Context, item Item, ch Chooser) (Result, err
 
 	follow := item.Kind != media.Series && r.RadarrSearch != nil
 	fallback := FallbackWait
-	if follow {
+	if follow && hasLowerRanked(rankedIDs(r.ProfileOrder, profiles), qp.ID) {
 		if fallback, err = ch.ChooseFallback(ctx, item, qp); err != nil {
 			return Result{}, err
 		}

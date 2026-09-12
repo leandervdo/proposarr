@@ -24,6 +24,10 @@ radarr:
   root_folder: ""
   # announced, inCinemas or released.
   minimum_availability: released
+  # Your ranking of Radarr's quality profiles, best first (names or ids, comma
+  # separated). When nothing fits a movie's profile, Proposarr may switch it to a
+  # profile ranked below. Empty: it never switches. Usually set in the web UI.
+  profile_order: ""
 
 # Optional. Configure Plex or Jellyfin to use watch history as the taste signal.
 plex:

@@ -289,7 +289,7 @@ export interface AppConfig {
   data_dir?: string;
   history_days?: number;
   snapshot_ttl?: string;
-  radarr?: { url?: string; api_key_set?: boolean; root_folder?: string; minimum_availability?: string };
+  radarr?: { url?: string; api_key_set?: boolean; root_folder?: string; minimum_availability?: string; profile_order?: string };
   sonarr?: { url?: string; api_key_set?: boolean; root_folder?: string };
   plex?: { url?: string; token_set?: boolean };
   jellyfin?: { url?: string; api_key_set?: boolean; user_id?: string };

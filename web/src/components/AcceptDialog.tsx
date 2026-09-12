@@ -1,9 +1,11 @@
 import { AlertCircle, Clock, HardDrive, Loader2 } from "lucide-react";
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { Link } from "react-router";
 import { toast } from "sonner";
 import { ApiError } from "@/api/client";
-import { useAppOptions, usePick, useRequestPick, useSwitchProfile } from "@/api/queries";
+import { useAppOptions, useConfig, usePick, useRequestPick, useSwitchProfile } from "@/api/queries";
 import type { IfNothingFits, Pick, ReleaseCheck } from "@/api/types";
+import { fallbackTargets } from "@/lib/fallback";
 import { appFor, appName, fileSize, gigabytes } from "@/lib/format";
 import { announceRelease, awaitRelease, isAwaitingRelease, takeAwaitedRelease, useReleaseShown } from "@/lib/releases";
 import { TitleLinks } from "./PickMeta";
@@ -74,6 +76,7 @@ function AcceptForm({ pick, onAdded, onClose }: { pick: Pick; onAdded: (pick: Pi
   const name = appName(app);
   const movie = app === "radarr";
   const options = useAppOptions(app, true);
+  const profileOrder = useConfig().data?.radarr?.profile_order;
   const request = useRequestPick();
   const mounted = useMounted();
   const [profileId, setProfileId] = useState<string>("");
@@ -82,6 +85,9 @@ function AcceptForm({ pick, onAdded, onClose }: { pick: Pick; onAdded: (pick: Pi
   const [error, setError] = useState<string | null>(null);
 
   const profiles = options.data?.quality_profiles ?? [];
+  const targets = fallbackTargets(profileOrder, Number(profileId), profiles);
+  // Without a lower-ranked profile the server always waits, so that is what the dialog shows and sends.
+  const fallback: IfNothingFits = targets.available ? ifNothingFits : "wait";
   const folders = options.data?.root_folders ?? [];
   const needsFolder = folders.length > 1 && !options.data?.default_root_folder;
   const canSubmit = profileId !== "" && (!needsFolder || rootFolder !== "") && !request.isPending;
@@ -96,7 +102,7 @@ function AcceptForm({ pick, onAdded, onClose }: { pick: Pick; onAdded: (pick: Pi
         pick,
         qualityProfileId: Number(profileId),
         rootFolder: needsFolder ? rootFolder : undefined,
-        ifNothingFits: movie ? ifNothingFits : undefined,
+        ifNothingFits: movie ? fallback : undefined,
       });
       const release = updated.request?.release;
       if (release?.status === "checking") {
@@ -169,19 +175,35 @@ function AcceptForm({ pick, onAdded, onClose }: { pick: Pick; onAdded: (pick: Pi
 
           {movie && profiles.length > 0 && (
             <fieldset className="mt-6" disabled={request.isPending}>
-              <legend className="mb-1 text-sm font-semibold">If nothing fits this profile</legend>
-              <p id="if-nothing-fits-hint" className="mb-3 text-sm text-text-muted">
-                Radarr searches first; Proposarr only steps in when nothing fits.
-              </p>
+              <legend className="mb-3 text-sm font-semibold">If nothing fits this profile</legend>
               <RadioGroup
-                value={ifNothingFits}
+                value={fallback}
                 onValueChange={(v) => setIfNothingFits(v as IfNothingFits)}
                 aria-label="If nothing fits this profile"
                 aria-describedby="if-nothing-fits-hint"
               >
-                <RadioCard value="switch">Switch to the best profile that finds it</RadioCard>
+                <RadioCard value="switch" disabled={!targets.available} className="disabled:cursor-not-allowed disabled:opacity-50">
+                  Switch to the next lower-ranked profile that finds it
+                </RadioCard>
                 <RadioCard value="wait">Keep waiting</RadioCard>
               </RadioGroup>
+              <p id="if-nothing-fits-hint" className="mt-2 text-sm text-text-muted">
+                {targets.available ? (
+                  `Tries ${targets.lower.map((p) => p.name).join(", then ")}.`
+                ) : profileOrder && profileId === "" ? (
+                  "Choose a quality profile to see what it can fall back to."
+                ) : targets.reason === "last" ? (
+                  "Nothing is ranked below this profile."
+                ) : (
+                  <>
+                    Rank your quality profiles under{" "}
+                    <Link to="/connections" className="text-text underline decoration-border underline-offset-4 hover:decoration-text">
+                      Connections
+                    </Link>{" "}
+                    to fall back automatically.
+                  </>
+                )}
+              </p>
             </fieldset>
           )}
 

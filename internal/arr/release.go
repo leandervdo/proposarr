@@ -199,11 +199,8 @@ func (r *Radarr) MovieSearches(ctx context.Context, movieID int) ([]Command, err
 
 type qualityJSON struct {
 	Quality struct {
-		ID         int    `json:"id"`
-		Name       string `json:"name"`
-		Source     string `json:"source"`
-		Resolution int    `json:"resolution"`
-		Modifier   string `json:"modifier"`
+		ID   int    `json:"id"`
+		Name string `json:"name"`
 	} `json:"quality"`
 }
 
@@ -292,9 +289,6 @@ type Release struct {
 	Seeders       int    // torrents only
 	QualityID     int
 	Quality       string
-	Resolution    int
-	Source        string // e.g. bluray, webdl, webrip, tv
-	Modifier      string // e.g. remux, brdisk, none
 	CustomFormats []int
 	Languages     []int
 	Approved      bool // Radarr would grab it for the movie as it is now
@@ -338,7 +332,7 @@ func (r *Radarr) Releases(ctx context.Context, movieID int) ([]Release, error) {
 		q := x.Quality.Quality
 		rel := Release{
 			GUID: x.GUID, IndexerID: x.IndexerID, Indexer: x.Indexer, Title: x.Title, Size: x.Size, Protocol: x.Protocol,
-			QualityID: q.ID, Quality: q.Name, Resolution: q.Resolution, Source: q.Source, Modifier: q.Modifier,
+			QualityID: q.ID, Quality: q.Name,
 			CustomFormats: ids(x.CustomFormats), Languages: ids(x.Languages),
 			Approved:   x.Approved && (x.DownloadAllowed == nil || *x.DownloadAllowed),
 			Rejections: x.Rejections,

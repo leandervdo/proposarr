@@ -163,17 +163,18 @@ movies:
   picks: 4
 `)
 	env := map[string]string{
-		"PROPOSARR_DATA_DIR":       "/env",
-		"PROPOSARR_HISTORY_DAYS":   "30",
-		"PROPOSARR_SNAPSHOT_TTL":   "1h",
-		"PROPOSARR_RADARR_URL":     "http://env-radarr/",
-		"PROPOSARR_RADARR_API_KEY": "envkey",
-		"PROPOSARR_MOVIES_MODEL":   "env-model",
-		"PROPOSARR_MOVIES_PICKS":   "12",
-		"PROPOSARR_SERIES_EFFORT":  "high",
-		"PROPOSARR_TMDB_REGION":    "DE",
-		"PROPOSARR_CLAUDE_TIMEOUT": "2m",
-		"PROPOSARR_JELLYFIN_URL":   "http://jf/",
+		"PROPOSARR_DATA_DIR":             "/env",
+		"PROPOSARR_HISTORY_DAYS":         "30",
+		"PROPOSARR_SNAPSHOT_TTL":         "1h",
+		"PROPOSARR_RADARR_URL":           "http://env-radarr/",
+		"PROPOSARR_RADARR_API_KEY":       "envkey",
+		"PROPOSARR_RADARR_PROFILE_ORDER": "Remux + WEB 2160p,8",
+		"PROPOSARR_MOVIES_MODEL":         "env-model",
+		"PROPOSARR_MOVIES_PICKS":         "12",
+		"PROPOSARR_SERIES_EFFORT":        "high",
+		"PROPOSARR_TMDB_REGION":          "DE",
+		"PROPOSARR_CLAUDE_TIMEOUT":       "2m",
+		"PROPOSARR_JELLYFIN_URL":         "http://jf/",
 	}
 	c, err := Load(p, envMap(env))
 	if err != nil {
@@ -182,7 +183,7 @@ movies:
 	if c.DataDir != "/env" || c.HistoryDays != 30 || c.SnapshotTTL.Duration != time.Hour {
 		t.Errorf("top-level: %+v", c)
 	}
-	if c.Radarr.URL != "http://env-radarr" || c.Radarr.APIKey != "envkey" {
+	if c.Radarr.URL != "http://env-radarr" || c.Radarr.APIKey != "envkey" || c.Radarr.ProfileOrder != "Remux + WEB 2160p,8" {
 		t.Errorf("radarr: %+v", c.Radarr)
 	}
 	if c.Movies.Model != "env-model" || c.Movies.Picks != 12 || c.Series.Effort != "high" {

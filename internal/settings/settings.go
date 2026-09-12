@@ -13,6 +13,7 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,6 +53,7 @@ const (
 	typeDuration
 	typeRegion
 	typeModel
+	typeProfiles // quality profile names or ids, comma separated
 )
 
 // field is one editable key and where it lives in config.Config.
@@ -109,7 +111,9 @@ func buildFields() []field {
 	var fs []field
 	fs = append(fs, arr("radarr", "PROPOSARR_RADARR_", func(c *config.Config) *config.Arr { return &c.Radarr })...)
 	fs = append(fs, field{key: "radarr.minimum_availability", env: "PROPOSARR_RADARR_MINIMUM_AVAILABILITY", typ: typeEnum,
-		enum: []string{"announced", "inCinemas", "released"}, str: func(c *config.Config) *string { return &c.Radarr.MinimumAvailability }})
+		enum: []string{"announced", "inCinemas", "released"}, str: func(c *config.Config) *string { return &c.Radarr.MinimumAvailability }},
+		field{key: "radarr.profile_order", env: "PROPOSARR_RADARR_PROFILE_ORDER", typ: typeProfiles,
+			str: func(c *config.Config) *string { return &c.Radarr.ProfileOrder }})
 	fs = append(fs, arr("sonarr", "PROPOSARR_SONARR_", func(c *config.Config) *config.Arr { return &c.Sonarr })...)
 	fs = append(fs,
 		field{key: "plex.url", env: "PROPOSARR_PLEX_URL", typ: typeURL, str: func(c *config.Config) *string { return &c.Plex.URL }},
@@ -189,6 +193,21 @@ func (f *field) normalize(v string) (string, error) {
 			return "", errors.New("must be more than 0")
 		}
 		return formatDuration(d), nil
+	case typeProfiles:
+		var entries []string
+		for _, e := range strings.Split(v, ",") {
+			e = strings.TrimSpace(e)
+			switch {
+			case e == "":
+				continue
+			case len(e) > 100:
+				return "", errors.New("must be quality profile names or ids separated by commas")
+			case slices.Contains(entries, e):
+				return "", fmt.Errorf("lists %q twice", e)
+			}
+			entries = append(entries, e)
+		}
+		return strings.Join(entries, ","), nil
 	case typeRegion:
 		if len(v) != 2 || !isLetters(v) {
 			return "", errors.New("must be a two-letter country code")

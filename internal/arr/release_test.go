@@ -72,7 +72,7 @@ func TestRadarrReleases(t *testing.T) {
 	}
 	a := rs[0]
 	if a.GUID != "a" || a.IndexerID != 1 || a.Indexer != "TorrentLeech" || a.Size != 32_400_000_000 || a.Protocol != "torrent" || a.Seeders != 249 ||
-		a.QualityID != 30 || a.Quality != "Remux-1080p" || a.Resolution != 1080 || a.Source != "bluray" || a.Modifier != "remux" ||
+		a.QualityID != 30 || a.Quality != "Remux-1080p" ||
 		!slices.Equal(a.CustomFormats, []int{7, 47}) || !slices.Equal(a.Languages, []int{1}) || a.Approved || len(a.Rejections) != 1 {
 		t.Errorf("release = %+v", a)
 	}

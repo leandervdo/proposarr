@@ -20,7 +20,7 @@ interface ShellProps {
   children: ReactNode;
 }
 
-function FieldShell({ id, label, optional, help, error, field, configFile, children }: ShellProps) {
+export function FieldShell({ id, label, optional, help, error, field, configFile, children }: ShellProps) {
   return (
     <div className="flex min-w-0 flex-col gap-1.5">
       <div className="flex items-baseline justify-between gap-3">

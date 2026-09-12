@@ -175,6 +175,7 @@ func TestUpdateValidation(t *testing.T) {
 		"plex.token":                  "has space",
 		"history_days":                true,
 		"radarr.minimum_availability": "tomorrow",
+		"radarr.profile_order":        "8, 10, 8",
 		"series.model":                "claude sonnet",
 	}
 	for key, v := range bad {
@@ -199,13 +200,14 @@ func TestUpdateValidation(t *testing.T) {
 		"claude.max_budget_usd":       "0.50",
 		"series.picks":                "7",
 		"radarr.minimum_availability": "incinemas",
+		"radarr.profile_order":        " 8 , HD Bluray + WEB,, 10 ",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := res.Config
 	if c.Radarr.URL != "http://r:7878" || c.TMDB.Region != "NL" || c.Movies.Effort != "high" || c.SnapshotTTL.Duration != 6*time.Hour ||
-		c.Claude.MaxBudgetUSD != 0.5 || c.Series.Picks != 7 || c.Radarr.MinimumAvailability != "inCinemas" {
+		c.Claude.MaxBudgetUSD != 0.5 || c.Series.Picks != 7 || c.Radarr.MinimumAvailability != "inCinemas" || c.Radarr.ProfileOrder != "8,HD Bluray + WEB,10" {
 		t.Fatalf("normalized config = %+v", c)
 	}
 	v := res.View(nil)

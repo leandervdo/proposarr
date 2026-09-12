@@ -558,6 +558,7 @@ type FieldSpec = { value?: string | number; secret?: boolean; kind?: "int" | "fl
 const SPECS: Record<string, FieldSpec> = {
   "radarr.url": { kind: "url" }, "radarr.api_key": { secret: true }, "radarr.root_folder": {},
   "radarr.minimum_availability": { value: "released", kind: "enum", options: ["announced", "inCinemas", "released"] },
+  "radarr.profile_order": {},
   "sonarr.url": { kind: "url" }, "sonarr.api_key": { secret: true }, "sonarr.root_folder": {},
   "plex.url": { kind: "url" }, "plex.token": { secret: true },
   "jellyfin.url": { kind: "url" }, "jellyfin.api_key": { secret: true }, "jellyfin.user_id": {},
@@ -599,6 +600,7 @@ function put(key: string, over: Partial<SettingField>) {
 if (scenario !== "setup") {
   put("radarr.url", { value: "http://192.168.1.10:7878", source: "ui" });
   put("radarr.api_key", { source: "default", hint: "read from initialize.json" });
+  put("radarr.profile_order", { value: "7,5,6,4", source: "ui" });
   put("sonarr.url", { value: "http://192.168.1.10:8989", source: "env", locked: true });
   put("plex.url", { value: "http://192.168.1.10:32400", source: "ui" });
   put("plex.token", { source: "ui" });
@@ -644,6 +646,10 @@ function validate(key: string, value: string | number): string | null {
       return spec.options!.includes(s) ? null : `Choose one of ${spec.options!.join(", ")}`;
   }
   if (key === "tmdb.region" && !/^[A-Za-z]{2}$/.test(s)) return "Use a two-letter country code, like US or NL";
+  if (key === "radarr.profile_order") {
+    const entries = s.split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+    if (new Set(entries).size !== entries.length) return "List each quality profile once";
+  }
   return null;
 }
 
@@ -871,7 +877,10 @@ async function route(method: string, path: string, body: unknown, headers: Heade
   if (method === "GET" && url.pathname === "/api/config") {
     return {
       listen: ":8585", data_dir: "/config/data", history_days: 180, snapshot_ttl: "6h0m0s",
-      radarr: { url: configured ? "http://192.168.1.10:7878" : "", api_key_set: false, root_folder: "", minimum_availability: "released" },
+      radarr: {
+        url: configured ? "http://192.168.1.10:7878" : "", api_key_set: false, root_folder: "", minimum_availability: "released",
+        profile_order: fields["radarr.profile_order"]!.set ? String(fields["radarr.profile_order"]!.value) : undefined,
+      },
       sonarr: { url: configured ? "http://192.168.1.10:8989" : "", api_key_set: false, root_folder: "" },
       plex: { url: configured ? "http://192.168.1.10:32400" : "", token_set: configured },
       jellyfin: { url: "", api_key_set: false, user_id: "" },

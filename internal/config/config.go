@@ -39,6 +39,10 @@ type Arr struct {
 	RootFolder string `yaml:"root_folder"`
 	// MinimumAvailability is Radarr only: announced, inCinemas or released.
 	MinimumAvailability string `yaml:"minimum_availability"`
+	// ProfileOrder is Radarr only: the user's ranking of the quality profiles,
+	// names or ids, comma separated, best first. When nothing fits a movie's
+	// profile it may fall back to profiles ranked below it; empty never does.
+	ProfileOrder string `yaml:"profile_order"`
 }
 
 func (a Arr) Configured() bool { return a.URL != "" && a.APIKey != "" }
@@ -214,6 +218,7 @@ func applyEnv(c *Config, getenv func(string) string) error {
 		str(a.prefix+"ROOT_FOLDER", &a.dst.RootFolder)
 	}
 	str("PROPOSARR_RADARR_MINIMUM_AVAILABILITY", &c.Radarr.MinimumAvailability)
+	str("PROPOSARR_RADARR_PROFILE_ORDER", &c.Radarr.ProfileOrder)
 
 	str("PROPOSARR_PLEX_URL", &c.Plex.URL)
 	str("PROPOSARR_PLEX_TOKEN", &c.Plex.Token)

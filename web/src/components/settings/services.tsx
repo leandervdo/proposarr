@@ -5,11 +5,12 @@ import type { CheckResult, Service, Settings, TestResult } from "@/api/types";
 import { cn } from "@/lib/utils";
 import { Button } from "../ui/button";
 import { Segmented } from "../ui/segmented";
+import { ProfileRankingField } from "./ProfileRankingField";
 import { SecretField, SelectField, TextField } from "./fields";
 import { useServiceForm, type ServiceForm } from "./useServiceForm";
 
 export const SERVICE_KEYS: Record<Service, readonly string[]> = {
-  radarr: ["radarr.url", "radarr.api_key", "radarr.root_folder", "radarr.minimum_availability"],
+  radarr: ["radarr.url", "radarr.api_key", "radarr.root_folder", "radarr.minimum_availability", "radarr.profile_order"],
   sonarr: ["sonarr.url", "sonarr.api_key", "sonarr.root_folder"],
   plex: ["plex.url", "plex.token"],
   jellyfin: ["jellyfin.url", "jellyfin.api_key", "jellyfin.user_id"],
@@ -32,8 +33,8 @@ const AVAILABILITY = [
   { value: "released", label: "When released" },
 ];
 
-/** The inputs for one service. Used by the Connections page and first-run setup. */
-export function ServiceFields({ service, form }: { service: Service; form: ServiceForm }) {
+/** The inputs for one service. Used by the Connections page and first-run setup (which ranks profiles in a step of its own). */
+export function ServiceFields({ service, form, ranking = true }: { service: Service; form: ServiceForm; ranking?: boolean }) {
   switch (service) {
     case "radarr":
     case "sonarr": {
@@ -52,7 +53,12 @@ export function ServiceFields({ service, form }: { service: Service; form: Servi
             />
           </div>
           <TextField form={form} k={`${service}.root_folder`} label="Root folder" optional placeholder={service === "radarr" ? "/media/movies" : "/media/series"} help="Leave empty to be asked when there is more than one." />
-          {service === "radarr" && <SelectField form={form} k="radarr.minimum_availability" label="Search for movies" options={AVAILABILITY} />}
+          {service === "radarr" && (
+            <>
+              <SelectField form={form} k="radarr.minimum_availability" label="Search for movies" options={AVAILABILITY} />
+              {ranking && <ProfileRankingField form={form} className="sm:col-span-2" />}
+            </>
+          )}
         </div>
       );
     }
