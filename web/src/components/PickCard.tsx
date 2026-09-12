@@ -1,14 +1,15 @@
 import { Check, Clock, EyeOff, Plus, RotateCcw, Tv } from "lucide-react";
-import { useState } from "react";
-import { toast } from "sonner";
-import { useSetVerdict } from "@/api/queries";
-import type { Pick, Verdict } from "@/api/types";
+import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { Link } from "react-router";
+import type { Pick } from "@/api/types";
 import { appFor, appName, shortDate } from "@/lib/format";
 import { ratingScore } from "@/lib/ratings";
+import { useOpenTitle, useTitleLink } from "@/lib/titleModal";
 import { cn } from "@/lib/utils";
 import { RatingChips, TitleLinks } from "./PickMeta";
 import { Poster } from "./Poster";
 import { Button } from "./ui/button";
+import { useVerdictActions } from "./useVerdictActions";
 
 interface PickCardProps {
   pick: Pick;
@@ -19,38 +20,63 @@ interface PickCardProps {
 
 export function PickCard({ pick, onAccept, openSearch = false }: PickCardProps) {
   const [revealed, setRevealed] = useState(false);
-  const setVerdict = useSetVerdict();
+  const { decide } = useVerdictActions();
+  const openTitle = useOpenTitle();
+  const titleLink = useTitleLink();
+  const cardRef = useRef<HTMLElement>(null);
+  const pointerType = useRef<string>("mouse");
   const app = appName(appFor(pick.kind));
   const added = pick.request?.status === "added";
+  const target = { kind: pick.kind, tmdbId: pick.tmdb_id, pickId: pick.id };
+  const link = titleLink(target);
 
-  const decide = (verdict: Verdict | "") => {
-    const previous = pick.verdict ?? "";
-    setVerdict.mutate(
-      { pick, verdict },
-      {
-        onSuccess: () => {
-          const label = verdict === "later" ? "Saved for later" : verdict === "ignored" ? "Ignored" : "Moved back to undecided";
-          toast(label, {
-            description: pick.title,
-            action: { label: "Undo", onClick: () => setVerdict.mutate({ pick: { ...pick, verdict: verdict || undefined }, verdict: previous }) },
-          });
-        },
-        onError: (err) => toast.error(`Could not update ${pick.title}`, { description: err.message }),
-      },
-    );
+  const open = () => {
+    setRevealed(false);
+    openTitle(target);
+  };
+
+  // On touch, a tap elsewhere hides the revealed details again.
+  useEffect(() => {
+    if (!revealed) return;
+    const onDown = (e: PointerEvent) => {
+      if (!cardRef.current?.contains(e.target as Node)) setRevealed(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  }, [revealed]);
+
+  const onPosterClick = (e: MouseEvent<HTMLDivElement>) => {
+    // Buttons and links act on their own; they must not open the details.
+    if ((e.target as HTMLElement).closest("button, a")) return;
+    // Touch has no hover: the first tap shows the quick actions, the next one opens the details.
+    if (pointerType.current === "touch" && !revealed) {
+      setRevealed(true);
+      return;
+    }
+    open();
+  };
+
+  const onKeyDown = (e: KeyboardEvent<HTMLElement>) => {
+    if (e.key === "Enter" && e.target === e.currentTarget) {
+      e.preventDefault();
+      open();
+    }
   };
 
   return (
     <article
-      aria-label={`${pick.title}${pick.year ? ` (${pick.year})` : ""}, score ${pick.score}`}
-      className="group/card relative flex flex-col"
+      ref={cardRef}
+      tabIndex={0}
+      onKeyDown={onKeyDown}
+      aria-label={`${pick.title}${pick.year ? ` (${pick.year})` : ""}, score ${pick.score}. Press Enter for details.`}
+      className="group/card relative flex flex-col rounded-[var(--radius-poster)] focus-visible:outline-offset-4"
     >
       <div
-        className="relative"
-        onPointerUp={(e) => {
-          // Buttons and links act on their own; they must not toggle the details.
-          if (e.pointerType === "touch" && !(e.target as HTMLElement).closest("button, a")) setRevealed((r) => !r);
+        className="relative cursor-pointer"
+        onPointerDown={(e) => {
+          pointerType.current = e.pointerType;
         }}
+        onClick={onPosterClick}
       >
         <Poster
           src={pick.poster_url}
@@ -94,6 +120,7 @@ export function PickCard({ pick, onAccept, openSearch = false }: PickCardProps) 
             <span className="line-clamp-1">{pick.streaming && pick.streaming.length > 0 ? `Streams on ${pick.streaming.join(", ")}` : "Not on a streaming service here"}</span>
           </p>
           <TitleLinks pick={pick} tone="poster" className="mt-2" />
+          <p className="mt-2 hidden text-[11px] text-white/55 [@media(hover:none)]:block">Tap again for details</p>
 
           <div className="mt-3 flex items-center gap-1.5">
             {added ? (
@@ -106,17 +133,17 @@ export function PickCard({ pick, onAccept, openSearch = false }: PickCardProps) 
               </Button>
             )}
             {!added && pick.verdict !== "later" && (
-              <Button variant="onPoster" size="iconSm" aria-label={`Save ${pick.title} for later`} title="Later" onClick={() => decide("later")}>
+              <Button variant="onPoster" size="iconSm" aria-label={`Save ${pick.title} for later`} title="Later" onClick={() => decide(pick, "later")}>
                 <Clock />
               </Button>
             )}
             {!added && pick.verdict !== "ignored" && (
-              <Button variant="onPoster" size="iconSm" aria-label={`Ignore ${pick.title}`} title="Ignore" onClick={() => decide("ignored")}>
+              <Button variant="onPoster" size="iconSm" aria-label={`Ignore ${pick.title}`} title="Ignore" onClick={() => decide(pick, "ignored")}>
                 <EyeOff />
               </Button>
             )}
             {!added && (pick.verdict === "later" || pick.verdict === "ignored") && (
-              <Button variant="onPoster" size="iconSm" aria-label={`Move ${pick.title} back to undecided`} title="Move back" onClick={() => decide("")}>
+              <Button variant="onPoster" size="iconSm" aria-label={`Move ${pick.title} back to undecided`} title="Move back" onClick={() => decide(pick, "")}>
                 <RotateCcw />
               </Button>
             )}
@@ -126,7 +153,10 @@ export function PickCard({ pick, onAccept, openSearch = false }: PickCardProps) 
 
       <div className="mt-3 flex min-w-0 flex-col gap-1.5 px-0.5">
         <h3 className="text-[15px] leading-tight font-semibold">
-          <span className="line-clamp-1">{pick.title}</span>
+          {/* The card itself takes keyboard focus; the link serves pointers, new tabs and screen reader browsing. */}
+          <Link to={link.to} state={link.state} tabIndex={-1} className="line-clamp-1 decoration-text-muted/60 underline-offset-4 hover:underline">
+            {pick.title}
+          </Link>
           {pick.year && <span className="nums text-[13px] font-normal text-text-muted">{pick.year}</span>}
         </h3>
         <RatingChips ratings={pick.ratings} />

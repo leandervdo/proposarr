@@ -2,9 +2,11 @@ package tmdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -188,14 +190,29 @@ type rawDetails struct {
 	} `json:"watch/providers"`
 }
 
+// ErrNotFound is returned (wrapping the HTTP 404) when TMDB does not know a title.
+var ErrNotFound = errors.New("tmdb: title not found")
+
+func (c *Client) getTitle(ctx context.Context, kind media.Kind, id int, appendTo string, out any) error {
+	q := url.Values{"append_to_response": {appendTo}}
+	err := c.hc.Get(ctx, fmt.Sprintf("/%s/%d", segment(kind), id), q, out)
+	if httpjson.IsStatus(err, http.StatusNotFound) {
+		return fmt.Errorf("%w: %w", ErrNotFound, err)
+	}
+	return err
+}
+
 // Details fetches one title with external ids and streaming providers for region
 // (default "US").
 func (c *Client) Details(ctx context.Context, kind media.Kind, id int, region string) (Details, error) {
 	var r rawDetails
-	q := url.Values{"append_to_response": {"watch/providers,external_ids"}}
-	if err := c.hc.Get(ctx, fmt.Sprintf("/%s/%d", segment(kind), id), q, &r); err != nil {
+	if err := c.getTitle(ctx, kind, id, "watch/providers,external_ids", &r); err != nil {
 		return Details{}, err
 	}
+	return r.details(kind, region), nil
+}
+
+func (r rawDetails) details(kind media.Kind, region string) Details {
 	d := Details{Item: r.item(kind), Status: r.Status}
 	for _, g := range r.Genres {
 		d.Genres = append(d.Genres, g.Name)
@@ -224,7 +241,125 @@ func (c *Client) Details(ctx context.Context, kind media.Kind, id int, region st
 			d.Providers = append(d.Providers, p.ProviderName)
 		}
 	}
-	return d, nil
+	return d
+}
+
+type rawFull struct {
+	rawDetails
+	Tagline          string `json:"tagline"`
+	BackdropPath     string `json:"backdrop_path"`
+	NumberOfSeasons  int    `json:"number_of_seasons"`
+	NumberOfEpisodes int    `json:"number_of_episodes"`
+	CreatedBy        []struct {
+		Name string `json:"name"`
+	} `json:"created_by"`
+	Credits struct {
+		Cast []struct {
+			Name        string `json:"name"`
+			Character   string `json:"character"`
+			ProfilePath string `json:"profile_path"`
+			Order       int    `json:"order"`
+		} `json:"cast"`
+		Crew []struct {
+			Name string `json:"name"`
+			Job  string `json:"job"`
+		} `json:"crew"`
+	} `json:"credits"`
+	Videos struct {
+		Results []struct {
+			Name     string `json:"name"`
+			Key      string `json:"key"`
+			Site     string `json:"site"`
+			Type     string `json:"type"`
+			Official bool   `json:"official"`
+		} `json:"results"`
+	} `json:"videos"`
+}
+
+// FullDetails fetches one title with credits, videos, streaming providers for
+// region (default "US") and external ids. An unknown id returns ErrNotFound.
+func (c *Client) FullDetails(ctx context.Context, kind media.Kind, id int, region string) (FullDetails, error) {
+	var r rawFull
+	if err := c.getTitle(ctx, kind, id, "credits,videos,watch/providers,external_ids", &r); err != nil {
+		return FullDetails{}, err
+	}
+	d := r.details(kind, region)
+	out := FullDetails{
+		ID:          d.ID,
+		Kind:        kind,
+		Title:       d.Title,
+		Year:        d.Year,
+		Tagline:     r.Tagline,
+		Overview:    d.Overview,
+		Genres:      nonNil(d.Genres),
+		Runtime:     d.Runtime,
+		ReleaseDate: r.ReleaseDate,
+		Status:      d.Status,
+		PosterURL:   PosterURL(d.PosterPath),
+		BackdropURL: imageURL(backdropBase, r.BackdropPath),
+		Directors:   []string{},
+		Cast:        []CastMember{},
+		Streaming:   nonNil(d.Providers),
+		IMDBID:      d.IMDBID,
+		TVDBID:      d.TVDBID,
+		Rating:      d.Rating,
+		Votes:       d.Votes,
+	}
+	seen := map[string]bool{}
+	addDirector := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			out.Directors = append(out.Directors, name)
+		}
+	}
+	if kind == media.Series {
+		out.ReleaseDate = r.FirstAirDate
+		out.Seasons, out.Episodes = r.NumberOfSeasons, r.NumberOfEpisodes
+		for _, p := range r.CreatedBy {
+			addDirector(p.Name)
+		}
+	} else {
+		for _, p := range r.Credits.Crew {
+			if p.Job == "Director" {
+				addDirector(p.Name)
+			}
+		}
+	}
+
+	cast := r.Credits.Cast
+	sort.SliceStable(cast, func(i, j int) bool { return cast[i].Order < cast[j].Order })
+	for _, p := range cast[:min(len(cast), MaxCast)] {
+		out.Cast = append(out.Cast, CastMember{Name: p.Name, Character: p.Character, ProfileURL: imageURL(profileBase, p.ProfilePath)})
+	}
+
+	// Official trailer, then any trailer, then a teaser; YouTube only.
+	best := 0
+	for _, v := range r.Videos.Results {
+		if v.Site != "YouTube" || v.Key == "" {
+			continue
+		}
+		rank := 0
+		switch {
+		case v.Type == "Trailer" && v.Official:
+			rank = 3
+		case v.Type == "Trailer":
+			rank = 2
+		case v.Type == "Teaser":
+			rank = 1
+		}
+		if rank > best {
+			best = rank
+			out.Trailer = &Trailer{Name: v.Name, YouTubeKey: v.Key}
+		}
+	}
+	return out, nil
+}
+
+func nonNil[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
 }
 
 // FindByTVDB maps a TVDB series id to a TMDB tv id. It returns 0 when TMDB

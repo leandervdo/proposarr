@@ -70,8 +70,11 @@ type Request struct {
 }
 
 type Pick struct {
-	ID    int64 `json:"id"`
-	RunID int64 `json:"run_id"`
+	ID          int64     `json:"id"`
+	RunID       int64     `json:"run_id"`
+	RunVibe     string    `json:"run_vibe,omitempty"`
+	RunUseTaste bool      `json:"run_use_taste"`
+	FoundAt     time.Time `json:"found_at"` // the run's started_at
 	pipeline.Pick
 	Verdict    Verdict    `json:"verdict,omitempty"`
 	VerdictAt  *time.Time `json:"verdict_at,omitempty"`
@@ -79,12 +82,25 @@ type Pick struct {
 	Request    *Request   `json:"request,omitempty"` // latest request for this pick
 }
 
+const (
+	DefaultPickLimit = 200
+	MaxPickLimit     = 1000
+)
+
 type PickFilter struct {
 	Kind      media.Kind // "" means both
-	RunID     int64      // 0 means any run
-	LatestRun bool       // only the most recent succeeded run of each kind; overrides RunID
+	RunID     int64      // 0 means any run, including failed ones
+	LatestRun bool       // only the most recent succeeded run of each kind; overrides AllRuns and RunID
+	AllRuns   bool       // every succeeded run; overrides RunID
 	Verdict   *Verdict   // nil means any; &VerdictNone means undecided
-	Limit     int        // 0 means 200
+	Added     bool       // the latest request has status added; ordered by its requested_at, newest first
+	Search    *bool      // nil means any; true: open-search runs only; false: taste runs only
+	Distinct  bool       // one pick per (tmdb_id, kind) among the matches: highest run id, then pick id
+	// ExcludeTMDB leaves out picks of these TMDB ids (titles now in the library),
+	// except picks whose latest request was added through Proposarr.
+	ExcludeTMDB []int
+	Limit       int // 0 means DefaultPickLimit; capped at MaxPickLimit
+	Offset      int
 }
 
 type Store interface {
@@ -99,6 +115,8 @@ type Store interface {
 	// LatestProfile is the profile of the most recent succeeded run; nil when none.
 	LatestProfile(ctx context.Context, kind media.Kind) (*profile.Profile, error)
 	ListPicks(ctx context.Context, f PickFilter) ([]Pick, error)
+	// CountPicks is the number of picks matching f, ignoring Limit and Offset.
+	CountPicks(ctx context.Context, f PickFilter) (int, error)
 	GetPick(ctx context.Context, id int64) (Pick, error)
 	// SetVerdict records a verdict for (kind, tmdbID); VerdictNone clears it.
 	// until is only meaningful for VerdictLater.

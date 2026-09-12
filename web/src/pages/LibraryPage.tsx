@@ -9,6 +9,7 @@ import { Poster } from "@/components/Poster";
 import { Button } from "@/components/ui/button";
 import { Segmented } from "@/components/ui/segmented";
 import { appFor, appName, relativeTime } from "@/lib/format";
+import { useTitleLink } from "@/lib/titleModal";
 import { cn } from "@/lib/utils";
 
 export function LibraryPage() {
@@ -18,6 +19,7 @@ export function LibraryPage() {
   const [query, setQuery] = useState("");
   const deferred = useDeferredValue(query);
   const app = appName(appFor(kind));
+  const titleLink = useTitleLink();
 
   const titles = useMemo(() => {
     const list = [...(library.data?.titles ?? [])].sort((a, b) => a.title.localeCompare(b.title));
@@ -89,15 +91,26 @@ export function LibraryPage() {
               <p className="py-12 text-center text-text-muted">No titles match “{query}”.</p>
             ) : (
               <ul className="grid grid-cols-3 gap-x-3 gap-y-5 sm:grid-cols-4 md:grid-cols-6 xl:grid-cols-5 2xl:grid-cols-7">
-                {titles.map((t) => (
-                  <li key={t.tmdb_id ?? t.tvdb_id ?? t.title}>
-                    <Poster src={t.poster_url} title={t.title} className="rounded-md" />
-                    <p className="mt-2 line-clamp-1 text-[13px] font-medium" title={t.title}>
-                      {t.title}
-                    </p>
-                    <p className="nums text-xs text-text-muted">{t.year ?? ""}</p>
-                  </li>
-                ))}
+                {titles.map((t) => {
+                  const body = (
+                    <>
+                      <Poster src={t.poster_url} title={t.title} className="rounded-md transition-[filter] duration-200 group-hover:brightness-110" />
+                      <p className="mt-2 line-clamp-1 text-[13px] font-medium decoration-text-muted/60 underline-offset-4 group-hover:underline" title={t.title}>
+                        {t.title}
+                      </p>
+                      <p className="nums text-xs text-text-muted">{t.year ?? ""}</p>
+                    </>
+                  );
+                  if (t.tmdb_id === undefined) return <li key={t.tvdb_id ?? t.title}>{body}</li>;
+                  const link = titleLink({ kind, tmdbId: t.tmdb_id });
+                  return (
+                    <li key={t.tmdb_id}>
+                      <Link to={link.to} state={link.state} className="group block rounded-md focus-visible:outline-offset-4">
+                        {body}
+                      </Link>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </section>

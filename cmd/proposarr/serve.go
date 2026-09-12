@@ -18,6 +18,7 @@ import (
 	"github.com/leandervdo/proposarr/internal/request"
 	"github.com/leandervdo/proposarr/internal/settings"
 	"github.com/leandervdo/proposarr/internal/store"
+	"github.com/leandervdo/proposarr/internal/tmdb"
 	"github.com/leandervdo/proposarr/internal/web"
 	ui "github.com/leandervdo/proposarr/web"
 )
@@ -109,7 +110,8 @@ func serverOptions(rt *runtime, st store.Store, log *slog.Logger) web.Options {
 		UI:       ui.Dist(),
 		Logger:   log,
 		NewRunner: func(progress func(string)) web.Runner {
-			return rt.state().deps.pipeline(false, progress, st)
+			// Runs always read a fresh library, so titles added in Radarr/Sonarr meanwhile are never proposed.
+			return rt.state().deps.pipeline(true, progress, st)
 		},
 		RunRequest: func(kind media.Kind, vibe string, useTaste bool) (pipeline.Request, error) {
 			s := rt.state()
@@ -127,7 +129,12 @@ func serverOptions(rt *runtime, st store.Store, log *slog.Logger) web.Options {
 			req := rt.state().deps.requester()
 			// The web chooser applies the root folder from the request, else the configured one.
 			req.RadarrRootFolder, req.SonarrRootFolder = "", ""
-			return req.Add(ctx, item, ch)
+			res, err := req.Add(ctx, item, ch)
+			if err == nil || errors.Is(err, request.ErrAlreadyInLibrary) {
+				// The library changed, or the cached snapshot missed it: refetch on the next read.
+				rt.state().deps.library(false).Invalidate(item.Kind)
+			}
+			return res, err
 		}),
 		App: func(app string) (web.AppCatalog, string, bool) {
 			s := rt.state()
@@ -145,6 +152,20 @@ func serverOptions(rt *runtime, st store.Store, log *slog.Logger) web.Options {
 		Check: func(ctx context.Context) []web.CheckResult {
 			s := rt.state()
 			return runChecks(ctx, s.cfg, s.deps)
+		},
+		Title: func(ctx context.Context, kind media.Kind, id int, region string) (tmdb.FullDetails, error) {
+			c := rt.state().deps.tmdb
+			if c == nil {
+				return tmdb.FullDetails{}, errors.New("TMDB is not configured: set tmdb.api_key")
+			}
+			return c.FullDetails(ctx, kind, id, region)
+		},
+		Ratings: func(ctx context.Context, kind media.Kind, id int) (*pipeline.Ratings, error) {
+			r := rt.state().deps.ratings()
+			if r == nil {
+				return nil, nil
+			}
+			return r.Ratings(ctx, kind, id)
 		},
 	}
 }

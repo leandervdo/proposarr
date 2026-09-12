@@ -132,7 +132,7 @@ func Default() Config {
 		Listen:      ":8585",
 		DataDir:     "data",
 		HistoryDays: 180,
-		SnapshotTTL: Duration{6 * time.Hour},
+		SnapshotTTL: Duration{10 * time.Minute},
 		Radarr:      Arr{MinimumAvailability: "released"},
 		TMDB:        TMDB{Region: "US"},
 		Claude:      Claude{Bin: "claude", Timeout: Duration{10 * time.Minute}},

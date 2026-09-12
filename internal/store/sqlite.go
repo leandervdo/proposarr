@@ -349,7 +349,7 @@ func (s *SQLite) GetRun(ctx context.Context, id int64) (Run, []Pick, error) {
 	if r.Profile, err = decodeProfile(prof); err != nil {
 		return Run{}, nil, err
 	}
-	picks, err := s.queryPicks(ctx, `p.run_id = ?`, []any{id}, -1)
+	picks, err := s.queryPicks(ctx, `p.run_id = ?`, []any{id}, pickOrder, -1, 0)
 	if err != nil {
 		return Run{}, nil, err
 	}
@@ -369,7 +369,39 @@ func (s *SQLite) LatestProfile(ctx context.Context, kind media.Kind) (*profile.P
 	return decodeProfile(prof)
 }
 
+const pickOrder = `p.run_id DESC, p.score DESC, p.id ASC`
+
 func (s *SQLite) ListPicks(ctx context.Context, f PickFilter) ([]Pick, error) {
+	where, args := pickWhere(f)
+	order := pickOrder
+	if f.Added {
+		order = `rq.requested_at DESC, ` + pickOrder
+	}
+	limit := f.Limit
+	switch {
+	case limit <= 0:
+		limit = DefaultPickLimit
+	case limit > MaxPickLimit:
+		limit = MaxPickLimit
+	}
+	return s.queryPicks(ctx, where, args, order, limit, max(f.Offset, 0))
+}
+
+func (s *SQLite) CountPicks(ctx context.Context, f PickFilter) (int, error) {
+	where, args := pickWhere(f)
+	q := `SELECT COUNT(*) ` + pickFrom
+	if where != "" {
+		q += ` WHERE ` + where
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count picks: %w", err)
+	}
+	return n, nil
+}
+
+// pickWhere turns a filter into a WHERE clause over pickFrom.
+func pickWhere(f PickFilter) (string, []any) {
 	var (
 		where []string
 		args  []any
@@ -387,6 +419,9 @@ func (s *SQLite) ListPicks(ctx context.Context, f PickFilter) ([]Pick, error) {
 			args = append(args, string(f.Kind))
 		}
 		where = append(where, `p.run_id IN (`+sub+` GROUP BY kind)`)
+	case f.AllRuns:
+		where = append(where, `ru.status = ?`)
+		args = append(args, RunSucceeded)
 	case f.RunID != 0:
 		where = append(where, `p.run_id = ?`)
 		args = append(args, f.RunID)
@@ -399,15 +434,31 @@ func (s *SQLite) ListPicks(ctx context.Context, f PickFilter) ([]Pick, error) {
 			args = append(args, string(*f.Verdict))
 		}
 	}
-	limit := f.Limit
-	if limit <= 0 {
-		limit = 200
+	if f.Added {
+		where = append(where, `rq.status = 'added'`)
 	}
-	return s.queryPicks(ctx, strings.Join(where, " AND "), args, limit)
+	if f.Search != nil {
+		where = append(where, `ru.use_taste = ?`)
+		args = append(args, !*f.Search)
+	}
+	if len(f.ExcludeTMDB) > 0 {
+		ids, _ := json.Marshal(f.ExcludeTMDB)
+		where = append(where, `(p.tmdb_id NOT IN (SELECT value FROM json_each(?)) OR rq.status = 'added')`)
+		args = append(args, string(ids))
+	}
+	clause := strings.Join(where, " AND ")
+	if !f.Distinct {
+		return clause, args
+	}
+	inner := `SELECT p.id, ROW_NUMBER() OVER (PARTITION BY p.tmdb_id, p.kind ORDER BY p.run_id DESC, p.id DESC) AS rn ` + pickFrom
+	if clause != "" {
+		inner += ` WHERE ` + clause
+	}
+	return `p.id IN (SELECT id FROM (` + inner + `) WHERE rn = 1)`, args
 }
 
 func (s *SQLite) GetPick(ctx context.Context, id int64) (Pick, error) {
-	picks, err := s.queryPicks(ctx, `p.id = ?`, []any{id}, 1)
+	picks, err := s.queryPicks(ctx, `p.id = ?`, []any{id}, pickOrder, 1, 0)
 	if err != nil {
 		return Pick{}, err
 	}
@@ -417,21 +468,24 @@ func (s *SQLite) GetPick(ctx context.Context, id int64) (Pick, error) {
 	return picks[0], nil
 }
 
-// queryPicks selects picks joined with their verdict and latest request.
-// limit < 0 means no limit.
-func (s *SQLite) queryPicks(ctx context.Context, where string, args []any, limit int) ([]Pick, error) {
-	q := `SELECT p.id, p.run_id, p.tmdb_id, p.imdb_id, p.kind, p.title, p.year, p.reason, p.related_to, p.score, p.source,
+// pickFrom joins picks with their run, verdict and latest request.
+const pickFrom = `FROM picks p
+	JOIN runs ru ON ru.id = p.run_id
+	LEFT JOIN verdicts v ON v.tmdb_id = p.tmdb_id AND v.kind = p.kind
+	LEFT JOIN requests rq ON rq.id = (SELECT MAX(r2.id) FROM requests r2 WHERE r2.pick_id = p.id)`
+
+// queryPicks selects picks over pickFrom. limit < 0 means no limit.
+func (s *SQLite) queryPicks(ctx context.Context, where string, args []any, order string, limit, offset int) ([]Pick, error) {
+	q := `SELECT p.id, p.run_id, ru.vibe, ru.use_taste, ru.started_at,
+			p.tmdb_id, p.imdb_id, p.kind, p.title, p.year, p.reason, p.related_to, p.score, p.source,
 			p.overview, p.genres, p.rating, p.streaming, p.poster_url, p.ratings,
 			v.verdict, v.until, v.decided_at,
-			rq.app, rq.target_id, rq.quality_profile, rq.root_folder, rq.status, rq.error, rq.requested_at
-		FROM picks p
-		LEFT JOIN verdicts v ON v.tmdb_id = p.tmdb_id AND v.kind = p.kind
-		LEFT JOIN requests rq ON rq.id = (SELECT MAX(r2.id) FROM requests r2 WHERE r2.pick_id = p.id)`
+			rq.app, rq.target_id, rq.quality_profile, rq.root_folder, rq.status, rq.error, rq.requested_at ` + pickFrom
 	if where != "" {
 		q += ` WHERE ` + where
 	}
-	q += ` ORDER BY p.run_id DESC, p.score DESC, p.id ASC LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, q, append(args, limit)...)
+	q += ` ORDER BY ` + order + ` LIMIT ? OFFSET ?`
+	rows, err := s.db.QueryContext(ctx, q, append(args, limit, offset)...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query picks: %w", err)
 	}
@@ -441,17 +495,22 @@ func (s *SQLite) queryPicks(ctx context.Context, where string, args []any, limit
 	for rows.Next() {
 		var (
 			p                                       Pick
+			found                                   string
 			kind, related, genres, streaming        string
 			ratings                                 sql.NullString
 			verdict, until, decided                 sql.NullString
 			app, qp, root, rstatus, rerr, requested sql.NullString
 			target                                  sql.NullInt64
 		)
-		if err := rows.Scan(&p.ID, &p.RunID, &p.TMDBID, &p.IMDBID, &kind, &p.Title, &p.Year, &p.Reason, &related, &p.Score, &p.Source,
+		if err := rows.Scan(&p.ID, &p.RunID, &p.RunVibe, &p.RunUseTaste, &found,
+			&p.TMDBID, &p.IMDBID, &kind, &p.Title, &p.Year, &p.Reason, &related, &p.Score, &p.Source,
 			&p.Overview, &genres, &p.Rating, &streaming, &p.PosterURL, &ratings,
 			&verdict, &until, &decided,
 			&app, &target, &qp, &root, &rstatus, &rerr, &requested); err != nil {
 			return nil, fmt.Errorf("store: scan pick: %w", err)
+		}
+		if p.FoundAt, err = parseTime(found); err != nil {
+			return nil, err
 		}
 		p.Kind = media.Kind(kind)
 		if p.RelatedTo, err = decodeSlice[string](related); err != nil {

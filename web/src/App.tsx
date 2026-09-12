@@ -5,6 +5,7 @@ import { ApiError } from "./api/client";
 import { LiveProvider } from "./api/live";
 import { AppShell } from "./components/AppShell";
 import { TooltipProvider } from "./components/ui/tooltip";
+import { CollectionPage } from "./pages/CollectionPage";
 import { ConnectionsPage } from "./pages/ConnectionsPage";
 import { LibraryPage } from "./pages/LibraryPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
@@ -30,6 +31,7 @@ const router = createBrowserRouter([
     element: <AppShell />,
     children: [
       { index: true, element: <PicksPage /> },
+      { path: "collection", element: <CollectionPage /> },
       { path: "runs", element: <RunsPage /> },
       { path: "library", element: <LibraryPage /> },
       { path: "connections", element: <ConnectionsPage /> },

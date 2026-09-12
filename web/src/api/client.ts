@@ -12,6 +12,7 @@ import type {
   Settings,
   Status,
   TestResult,
+  TitleDetails,
   Verdict,
   VerdictFilter,
 } from "./types";
@@ -33,11 +34,21 @@ export function isUnreachable(err: unknown): boolean {
   return err instanceof ApiError && err.status === 0;
 }
 
+interface Envelope<T> {
+  data: T;
+  headers: Headers;
+}
+
 async function request<T>(method: "GET" | "POST" | "PUT", path: string, body?: unknown): Promise<T> {
+  return (await send<T>(method, path, body)).data;
+}
+
+async function send<T>(method: "GET" | "POST" | "PUT", path: string, body?: unknown): Promise<Envelope<T>> {
   // Inline env check so production builds drop the mock chunk.
   if (import.meta.env.VITE_MOCK === "1") {
     const { mockFetch } = await import("./mock");
-    return mockFetch(method, path, body) as Promise<T>;
+    const { data, headers } = await mockFetch(method, path, body);
+    return { data: data as T, headers };
   }
   let res: Response;
   try {
@@ -63,14 +74,43 @@ async function request<T>(method: "GET" | "POST" | "PUT", path: string, body?: u
     // A proxy in front of a stopped backend answers 502/504.
     throw new ApiError(res.status === 502 || res.status === 504 ? 0 : res.status, message, fieldErrors);
   }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+  if (res.status === 204) return { data: undefined as T, headers: res.headers };
+  return { data: (await res.json()) as T, headers: res.headers };
 }
 
 export interface PicksQuery {
   kind?: Kind;
-  run?: "latest" | number;
+  /** `all` spans every succeeded run. */
+  run?: "latest" | "all" | number;
   verdict?: VerdictFilter;
+  /** Only picks whose latest request was added, newest request first. */
+  added?: boolean;
+  /** true: open-search runs only; false: taste runs only. */
+  search?: boolean;
+  /** One pick per title, the most recent. */
+  distinct?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export interface PicksPage {
+  picks: Pick[];
+  offset: number;
+  /** Matching picks before limit/offset (X-Total-Count). */
+  total: number;
+}
+
+function picksPath({ kind, run, verdict, added, search, distinct, limit, offset }: PicksQuery): string {
+  const q = new URLSearchParams();
+  if (kind) q.set("kind", kind);
+  if (run !== undefined) q.set("run", String(run));
+  if (verdict && verdict !== "all") q.set("verdict", verdict);
+  if (added) q.set("added", "true");
+  if (search !== undefined) q.set("search", String(search));
+  if (distinct) q.set("distinct", "true");
+  if (limit !== undefined) q.set("limit", String(limit));
+  if (offset) q.set("offset", String(offset));
+  return `/api/picks?${q}`;
 }
 
 export const api = {
@@ -81,13 +121,20 @@ export const api = {
   run: (id: number) => request<{ run: Run; picks: Pick[] }>("GET", `/api/runs/${id}`),
   startRun: (kind: Kind, vibe: string, useTaste = true) =>
     request<Run>("POST", "/api/runs", { kind, vibe: vibe.trim() || undefined, use_taste: useTaste }),
-  picks: ({ kind, run, verdict }: PicksQuery) => {
-    const q = new URLSearchParams();
-    if (kind) q.set("kind", kind);
-    if (run !== undefined) q.set("run", String(run));
-    if (verdict && verdict !== "all") q.set("verdict", verdict);
-    return request<Pick[]>("GET", `/api/picks?${q}`);
+  picks: (q: PicksQuery) => request<Pick[]>("GET", picksPath(q)),
+  /** One page of picks with the total from X-Total-Count. */
+  picksPage: async (q: PicksQuery): Promise<PicksPage> => {
+    const { data, headers } = await send<Pick[] | null>("GET", picksPath(q));
+    const picks = data ?? [];
+    const offset = q.offset ?? 0;
+    const header = Number(headers.get("X-Total-Count"));
+    // Servers without the header: assume another page exists while pages come back full.
+    const total = headers.has("X-Total-Count") && Number.isFinite(header)
+      ? header
+      : offset + picks.length + (q.limit !== undefined && picks.length === q.limit ? 1 : 0);
+    return { picks, offset, total };
   },
+  title: (kind: Kind, tmdbId: number) => request<TitleDetails>("GET", `/api/titles/${kind}/${tmdbId}`),
   setVerdict: (id: number, verdict: Verdict | "", laterDays?: number) =>
     request<Pick>("POST", `/api/picks/${id}/verdict`, laterDays ? { verdict, later_days: laterDays } : { verdict }),
   appOptions: (app: App) => request<AppOptions>("GET", `/api/apps/${app}/options`),

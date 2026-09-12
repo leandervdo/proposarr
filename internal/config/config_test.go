@@ -57,7 +57,7 @@ func writeFile(t *testing.T, content string) string {
 
 func TestDefault(t *testing.T) {
 	c := Default()
-	if c.DataDir != "data" || c.HistoryDays != 180 || c.SnapshotTTL.Duration != 6*time.Hour {
+	if c.DataDir != "data" || c.HistoryDays != 180 || c.SnapshotTTL.Duration != 10*time.Minute {
 		t.Errorf("unexpected top-level defaults: %+v", c)
 	}
 	if c.Radarr.MinimumAvailability != "released" || c.TMDB.Region != "US" {

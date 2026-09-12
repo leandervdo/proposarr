@@ -7,7 +7,7 @@ data_dir: data
 # Watch-history window in days.
 history_days: 180
 # How long the Sonarr/Radarr library snapshot is reused before refetching.
-snapshot_ttl: 6h
+snapshot_ttl: 10m
 
 # Required for series.
 sonarr:

@@ -1,6 +1,6 @@
 import { AlertCircle, Clapperboard, Filter, Gauge, Loader2, Search, Settings2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, Navigate, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { ApiError } from "@/api/client";
@@ -39,13 +39,17 @@ function matchesVerdict(p: Pick, v: VerdictFilter) {
   return p.verdict === v;
 }
 
-/** "Use my taste", remembered across visits when storage is available. */
-function useTastePreference(): [boolean, (value: boolean) => void] {
+/** "Use my taste", remembered across visits when storage is available. `startWithSearch` turns it off. */
+function useTastePreference(startWithSearch: boolean): [boolean, (value: boolean) => void] {
   const [value, setValue] = useState(() => {
     try {
+      if (startWithSearch) {
+        localStorage.setItem(USE_TASTE_KEY, "false");
+        return false;
+      }
       return localStorage.getItem(USE_TASTE_KEY) !== "false";
     } catch {
-      return true;
+      return !startWithSearch;
     }
   });
   const set = useCallback((next: boolean) => {
@@ -84,7 +88,21 @@ export function PicksPage() {
   const { running } = useLive();
   const picks = usePicks({ kind, run: runParam === "latest" ? "latest" : Number(runParam), verdict: "all" });
   const [accepting, setAccepting] = useState<Pick | null>(null);
-  const [useTaste, setUseTaste] = useTastePreference();
+  const [useTaste, setUseTaste] = useTastePreference(params.get("mode") === "search");
+
+  // ?mode=search (the Collection's "Try an open search") switches taste off once, then leaves the URL.
+  useEffect(() => {
+    if (params.get("mode") !== "search") return;
+    setParams(
+      (p) => {
+        const n = new URLSearchParams(p);
+        n.delete("mode");
+        return n;
+      },
+      { replace: true },
+    );
+    document.getElementById("vibe")?.focus();
+  }, [params, setParams]);
 
   const app = appFor(kind);
   const configured = status.data ? status.data.connections[app] && status.data.connections.tmdb : true;
@@ -236,7 +254,7 @@ export function PicksPage() {
                     animate={{ opacity: 1, y: 0, transition: { delay: Math.min(i, 12) * 0.025, duration: 0.3 } }}
                     exit={{ opacity: 0, scale: 0.94, transition: { duration: 0.18 } }}
                   >
-                    <PickCard pick={p} onAccept={setAccepting} openSearch={isOpenSearch(runsById.get(p.run_id))} />
+                    <PickCard pick={p} onAccept={setAccepting} openSearch={isOpenSearch(runsById.get(p.run_id)) || p.run_use_taste === false} />
                   </motion.li>
                 ))}
               </AnimatePresence>

@@ -2,12 +2,16 @@ package tmdb
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/leandervdo/proposarr/internal/httpjson"
 	"github.com/leandervdo/proposarr/internal/media"
 )
 
@@ -245,6 +249,158 @@ func TestRetriesOn429(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Errorf("calls = %d, want 2", calls.Load())
+	}
+}
+
+func TestFullDetailsMovie(t *testing.T) {
+	ctx := context.Background()
+	var gotAppend string
+	cast := `[`
+	for i := 13; i >= 0; i-- {
+		if i < 13 {
+			cast += ","
+		}
+		profile := `null`
+		if i == 0 {
+			profile = `"/amy.jpg"`
+		}
+		cast += fmt.Sprintf(`{"name":"Actor %d","character":"Role %d","order":%d,"profile_path":%s}`, i, i, i, profile)
+	}
+	cast += `]`
+	srv := serve(t, map[string]string{
+		"/movie/329865": `{"id":329865,"title":"Arrival","tagline":"Why are they here?","overview":"Linguist meets aliens","release_date":"2016-11-10",
+			"genres":[{"id":18,"name":"Drama"},{"id":878,"name":"Science Fiction"}],"status":"Released","runtime":116,"imdb_id":"tt2543164",
+			"poster_path":"/p.jpg","backdrop_path":"/b.jpg","vote_average":7.6,"vote_count":18000,
+			"credits":{"cast":` + cast + `,"crew":[{"name":"Bradford Young","job":"Director of Photography"},{"name":"Denis Villeneuve","job":"Director"},{"name":"Denis Villeneuve","job":"Director"}]},
+			"videos":{"results":[
+				{"name":"Vimeo Trailer","key":"v1","site":"Vimeo","type":"Trailer","official":true},
+				{"name":"Teaser","key":"t1","site":"YouTube","type":"Teaser","official":true},
+				{"name":"Fan Trailer","key":"f1","site":"YouTube","type":"Trailer","official":false},
+				{"name":"Featurette","key":"x1","site":"YouTube","type":"Featurette","official":true},
+				{"name":"Official Trailer","key":"o1","site":"YouTube","type":"Trailer","official":true},
+				{"name":"Official Trailer 2","key":"o2","site":"YouTube","type":"Trailer","official":true}]},
+			"external_ids":{"imdb_id":"tt2543164"},
+			"watch/providers":{"results":{"NL":{"flatrate":[{"provider_name":"Netflix"}]}}}}`,
+	}, func(r *http.Request) { gotAppend = r.URL.Query().Get("append_to_response") })
+	c := newClient(srv.URL, "k", nil)
+
+	d, err := c.FullDetails(ctx, media.Movies, 329865, "nl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAppend != "credits,videos,watch/providers,external_ids" {
+		t.Errorf("append_to_response = %q", gotAppend)
+	}
+	if d.ID != 329865 || d.Kind != media.Movies || d.Title != "Arrival" || d.Year != 2016 || d.Tagline != "Why are they here?" ||
+		d.Overview != "Linguist meets aliens" || d.Runtime != 116 || d.ReleaseDate != "2016-11-10" || d.Status != "Released" ||
+		d.Seasons != 0 || d.Episodes != 0 || d.IMDBID != "tt2543164" || d.Rating != 7.6 || d.Votes != 18000 {
+		t.Errorf("movie = %+v", d)
+	}
+	if d.PosterURL != "https://image.tmdb.org/t/p/w500/p.jpg" || d.BackdropURL != "https://image.tmdb.org/t/p/w1280/b.jpg" {
+		t.Errorf("images = %q %q", d.PosterURL, d.BackdropURL)
+	}
+	if !reflect.DeepEqual(d.Genres, []string{"Drama", "Science Fiction"}) || !reflect.DeepEqual(d.Directors, []string{"Denis Villeneuve"}) ||
+		!reflect.DeepEqual(d.Streaming, []string{"Netflix"}) {
+		t.Errorf("genres %v directors %v streaming %v", d.Genres, d.Directors, d.Streaming)
+	}
+	if len(d.Cast) != MaxCast {
+		t.Fatalf("cast = %d members, want %d", len(d.Cast), MaxCast)
+	}
+	for i, m := range d.Cast {
+		if m.Name != fmt.Sprintf("Actor %d", i) || m.Character != fmt.Sprintf("Role %d", i) {
+			t.Errorf("cast[%d] = %+v", i, m)
+		}
+	}
+	if d.Cast[0].ProfileURL != "https://image.tmdb.org/t/p/w185/amy.jpg" || d.Cast[1].ProfileURL != "" {
+		t.Errorf("profile urls = %q %q", d.Cast[0].ProfileURL, d.Cast[1].ProfileURL)
+	}
+	if d.Trailer == nil || *d.Trailer != (Trailer{Name: "Official Trailer", YouTubeKey: "o1"}) {
+		t.Errorf("trailer = %+v", d.Trailer)
+	}
+}
+
+func TestFullDetailsTrailerPreference(t *testing.T) {
+	ctx := context.Background()
+	video := func(name, key, site, typ string, official bool) string {
+		return fmt.Sprintf(`{"name":%q,"key":%q,"site":%q,"type":%q,"official":%v}`, name, key, site, typ, official)
+	}
+	for _, tc := range []struct {
+		name   string
+		videos []string
+		want   *Trailer
+	}{
+		{"unofficial trailer beats teaser", []string{video("Teaser", "t", "YouTube", "Teaser", true), video("Trailer", "tr", "YouTube", "Trailer", false)}, &Trailer{"Trailer", "tr"}},
+		{"teaser when no trailer", []string{video("Clip", "c", "YouTube", "Clip", true), video("Teaser", "t", "YouTube", "Teaser", false)}, &Trailer{"Teaser", "t"}},
+		{"no youtube video", []string{video("Trailer", "v", "Vimeo", "Trailer", true), video("Clip", "c", "YouTube", "Clip", true)}, nil},
+		{"no videos", nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := serve(t, map[string]string{
+				"/movie/1": `{"id":1,"title":"X","videos":{"results":[` + strings.Join(tc.videos, ",") + `]}}`,
+			}, nil)
+			d, err := newClient(srv.URL, "k", nil).FullDetails(ctx, media.Movies, 1, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(d.Trailer, tc.want) {
+				t.Errorf("trailer = %+v, want %+v", d.Trailer, tc.want)
+			}
+			if d.Directors == nil || d.Cast == nil || d.Genres == nil || d.Streaming == nil {
+				t.Errorf("nil slices: %+v", d)
+			}
+		})
+	}
+}
+
+func TestFullDetailsSeries(t *testing.T) {
+	ctx := context.Background()
+	srv := serve(t, map[string]string{
+		"/tv/95396": `{"id":95396,"name":"Severance","first_air_date":"2022-02-17","release_date":"","status":"Returning Series",
+			"episode_run_time":[55,40],"number_of_seasons":2,"number_of_episodes":19,"genres":[{"id":18,"name":"Drama"}],
+			"created_by":[{"name":"Dan Erickson"}],
+			"credits":{"cast":[{"name":"Adam Scott","character":"Mark S.","order":0}],"crew":[{"name":"Ben Stiller","job":"Director"}]},
+			"external_ids":{"imdb_id":"tt11280740","tvdb_id":371980},
+			"watch/providers":{"results":{"US":{"flatrate":[{"provider_name":"Apple TV+"}]}}}}`,
+	}, nil)
+	d, err := newClient(srv.URL, "k", nil).FullDetails(ctx, media.Series, 95396, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Title != "Severance" || d.Kind != media.Series || d.Year != 2022 || d.ReleaseDate != "2022-02-17" || d.Runtime != 55 ||
+		d.Seasons != 2 || d.Episodes != 19 || d.Status != "Returning Series" || d.IMDBID != "tt11280740" || d.TVDBID != 371980 {
+		t.Errorf("series = %+v", d)
+	}
+	if !reflect.DeepEqual(d.Directors, []string{"Dan Erickson"}) || !reflect.DeepEqual(d.Streaming, []string{"Apple TV+"}) ||
+		len(d.Cast) != 1 || d.Cast[0] != (CastMember{Name: "Adam Scott", Character: "Mark S."}) || d.Trailer != nil {
+		t.Errorf("directors %v streaming %v cast %+v trailer %+v", d.Directors, d.Streaming, d.Cast, d.Trailer)
+	}
+	if d.PosterURL != "" || d.BackdropURL != "" {
+		t.Errorf("images without paths = %q %q", d.PosterURL, d.BackdropURL)
+	}
+}
+
+func TestFullDetailsNotFound(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/movie/500" {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"success":false,"status_code":34,"status_message":"The resource you requested could not be found."}`))
+	}))
+	defer srv.Close()
+	c := newClient(srv.URL, "k", nil)
+
+	_, err := c.FullDetails(ctx, media.Series, 99999999, "")
+	if !errors.Is(err, ErrNotFound) || !httpjson.IsStatus(err, http.StatusNotFound) {
+		t.Errorf("404 err = %v", err)
+	}
+	if _, err := c.Details(ctx, media.Movies, 99999999, ""); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Details 404 err = %v", err)
+	}
+	if _, err := c.FullDetails(ctx, media.Movies, 500, ""); err == nil || errors.Is(err, ErrNotFound) {
+		t.Errorf("500 err = %v", err)
 	}
 }
 

@@ -1,4 +1,9 @@
 /data/
+# Never commit a database or encryption key, wherever a misplaced run creates one.
+secret.key
+*.db
+*.db-wal
+*.db-shm
 /config/
 docker-compose.yml
 docs/PLAN.md

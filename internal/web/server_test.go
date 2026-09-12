@@ -118,7 +118,23 @@ func (f *fakeStore) ListPicks(_ context.Context, filter store.PickFilter) ([]sto
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	out = out[min(filter.Offset, len(out)):]
+	if filter.Limit > 0 {
+		out = out[:min(filter.Limit, len(out))]
+	}
 	return out, nil
+}
+
+func (f *fakeStore) CountPicks(_ context.Context, filter store.PickFilter) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, p := range f.picks {
+		if filter.Kind == "" || p.Kind == filter.Kind {
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (f *fakeStore) GetPick(_ context.Context, id int64) (store.Pick, error) {
@@ -603,12 +619,64 @@ func TestListPicksFilters(t *testing.T) {
 	if f := env.store.lastFilter; f.LatestRun || f.RunID != 7 || f.Kind != media.Movies || f.Verdict == nil || *f.Verdict != store.VerdictNone {
 		t.Fatalf("filter = %+v", f)
 	}
+	// Titles already in the library (The Matrix, 603) are excluded from picks.
+	if f := env.store.lastFilter; len(f.ExcludeTMDB) != 1 || f.ExcludeTMDB[0] != 603 {
+		t.Fatalf("library exclusion = %v, want [603]", f.ExcludeTMDB)
+	}
 	wantStatus(t, env.do(t, "GET", "/api/picks?verdict=later", ""), http.StatusOK)
 	if f := env.store.lastFilter; f.Verdict == nil || *f.Verdict != store.VerdictLater {
 		t.Fatalf("filter = %+v", f)
 	}
 	for _, q := range []string{"verdict=maybe", "run=x", "run=-1", "kind=books"} {
 		wantStatus(t, env.do(t, "GET", "/api/picks?"+q, ""), http.StatusBadRequest)
+	}
+}
+
+func TestListPicksCollectionParams(t *testing.T) {
+	env := newEnv(t, nil)
+	found := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	for id := int64(1); id <= 3; id++ {
+		env.store.addPick(store.Pick{ID: id, RunID: 1, FoundAt: found, Pick: pipeline.Pick{TMDBID: int(id), Kind: media.Movies, Title: fmt.Sprint("T", id)}})
+	}
+	filter := func(target string) store.PickFilter {
+		t.Helper()
+		wantStatus(t, env.do(t, "GET", target, ""), http.StatusOK)
+		return env.store.lastFilter
+	}
+
+	if f := filter("/api/picks"); f.AllRuns || f.Added || f.Search != nil || f.Distinct || f.Limit != 0 || f.Offset != 0 {
+		t.Errorf("defaults = %+v", f)
+	}
+	if f := filter("/api/picks?run=all&added=true&distinct=true"); !f.AllRuns || f.LatestRun || f.RunID != 0 || !f.Added || !f.Distinct || f.Search != nil {
+		t.Errorf("added collection = %+v", f)
+	}
+	if f := filter("/api/picks?run=all&search=true&limit=1000&offset=0"); f.Search == nil || !*f.Search || f.Limit != 1000 || f.Offset != 0 {
+		t.Errorf("searches = %+v", f)
+	}
+	if f := filter("/api/picks?run=all&search=false&added=false&distinct=false&limit=1&offset=20"); f.Search == nil || *f.Search || f.Added || f.Distinct || f.Limit != 1 || f.Offset != 20 {
+		t.Errorf("explicit false = %+v", f)
+	}
+	for _, q := range []string{"added=yes", "added=1", "search=maybe", "distinct=TRUE", "limit=0", "limit=1001", "limit=x", "offset=-1", "offset=x"} {
+		rec := env.do(t, "GET", "/api/picks?"+q, "")
+		wantStatus(t, rec, http.StatusBadRequest)
+		if name, _, _ := strings.Cut(q, "="); !strings.Contains(rec.Body.String(), name) {
+			t.Errorf("%s: error does not name the parameter: %s", q, rec.Body.String())
+		}
+	}
+
+	rec := env.do(t, "GET", "/api/picks?run=all&limit=2&offset=1", "")
+	wantStatus(t, rec, http.StatusOK)
+	if got := rec.Header().Get("X-Total-Count"); got != "3" {
+		t.Errorf("X-Total-Count = %q, want 3", got)
+	}
+	picks := decode[[]store.Pick](t, rec)
+	if len(picks) != 2 || picks[0].ID != 2 {
+		t.Errorf("page = %+v", picks)
+	}
+	for _, want := range []string{`"run_use_taste":false`, `"found_at":"2026-09-01T10:00:00Z"`} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("missing %s in %s", want, rec.Body.String())
+		}
 	}
 }
 

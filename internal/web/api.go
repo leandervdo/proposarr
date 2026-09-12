@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -151,10 +152,12 @@ func (s *Server) listPicks(w http.ResponseWriter, r *http.Request) {
 	switch run := q.Get("run"); run {
 	case "", "latest":
 		f.LatestRun = true
+	case "all":
+		f.AllRuns = true
 	default:
 		id, err := strconv.ParseInt(run, 10, 64)
 		if err != nil || id <= 0 {
-			writeError(w, http.StatusBadRequest, `run must be "latest" or a run id`)
+			writeError(w, http.StatusBadRequest, `run must be "latest", "all" or a run id`)
 			return
 		}
 		f.RunID = id
@@ -172,12 +175,88 @@ func (s *Server) listPicks(w http.ResponseWriter, r *http.Request) {
 		}
 		f.Verdict = &verdict
 	}
+	var bools [3]*bool
+	for i, name := range []string{"added", "search", "distinct"} {
+		b, err := queryBool(q, name)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		bools[i] = b
+	}
+	f.Added = bools[0] != nil && *bools[0]
+	f.Search = bools[1]
+	f.Distinct = bools[2] != nil && *bools[2]
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > store.MaxPickLimit {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("limit must be an integer from 1 to %d", store.MaxPickLimit))
+			return
+		}
+		f.Limit = n
+	}
+	if v := q.Get("offset"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, "offset must be a non-negative integer")
+			return
+		}
+		f.Offset = n
+	}
+	f.ExcludeTMDB = s.libraryIDs(r.Context(), f.Kind)
 	picks, err := s.o.Store.ListPicks(r.Context(), f)
 	if err != nil {
 		s.internalError(w, "list picks", err)
 		return
 	}
+	total, err := s.o.Store.CountPicks(r.Context(), f)
+	if err != nil {
+		s.internalError(w, "count picks", err)
+		return
+	}
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	writeJSON(w, http.StatusOK, normalizePicks(picks))
+}
+
+// libraryIDs returns the TMDB ids currently in the library for kind (both
+// kinds when empty), so titles already in Radarr/Sonarr are not shown as picks.
+// An unavailable library filters nothing.
+func (s *Server) libraryIDs(ctx context.Context, kind media.Kind) []int {
+	if s.o.Library == nil {
+		return nil
+	}
+	kinds := []media.Kind{kind}
+	if kind == "" {
+		kinds = []media.Kind{media.Movies, media.Series}
+	}
+	var ids []int
+	for _, k := range kinds {
+		titles, err := s.o.Library(ctx, k)
+		if err != nil {
+			continue
+		}
+		for _, t := range titles {
+			if t.TMDBID > 0 {
+				ids = append(ids, t.TMDBID)
+			}
+		}
+	}
+	return ids
+}
+
+// queryBool parses an optional true|false query parameter; nil when absent.
+func queryBool(q url.Values, name string) (*bool, error) {
+	var b bool
+	switch q.Get(name) {
+	case "":
+		return nil, nil
+	case "true":
+		b = true
+	case "false":
+	default:
+		return nil, fmt.Errorf("%s must be true or false", name)
+	}
+	return &b, nil
 }
 
 func (s *Server) setVerdict(w http.ResponseWriter, r *http.Request) {

@@ -31,7 +31,8 @@ interface Request {
 }
 
 interface Pick {
-  id: number; run_id: number; tmdb_id: number; imdb_id?: string; kind: Kind; title: string; year?: number;
+  id: number; run_id: number; run_vibe?: string; run_use_taste: boolean; found_at: string;  // found_at = the run's started_at
+  tmdb_id: number; imdb_id?: string; kind: Kind; title: string; year?: number;
   reason: string; related_to: string[]; score: number; source: "candidate" | "free";
   overview?: string; genres?: string[]; rating?: number; streaming?: string[]; poster_url?: string;
   ratings?: Ratings;
@@ -61,6 +62,25 @@ interface LibraryTitle {
   added: string; poster_url?: string;
 }
 
+// Everything about one title, fetched live from TMDB (plus ratings from Radarr/Sonarr) for the detail modal.
+interface TitleDetails {
+  tmdb_id: number; kind: Kind; title: string; year?: number;
+  tagline?: string; overview?: string; genres: string[];
+  runtime?: number;            // minutes; typical episode length for series
+  release_date?: string;       // movies: release date; series: first air date (YYYY-MM-DD)
+  status?: string;             // e.g. "Released", "Returning Series", "Ended"
+  seasons?: number; episodes?: number;  // series only
+  poster_url?: string; backdrop_url?: string;  // backdrop at w1280
+  directors: string[];         // movies: directors; series: creators
+  cast: { name: string; character?: string; profile_url?: string }[];  // top 12 billed
+  trailer?: { name: string; youtube_key: string };  // first official YouTube trailer, else first YouTube trailer/teaser
+  streaming: string[];         // flatrate providers in the configured region
+  imdb_id?: string;
+  tmdb_rating?: number; tmdb_votes?: number;
+  ratings?: Ratings;           // same shape as Pick.ratings
+  in_library: boolean;
+}
+
 interface QualityProfile { id: number; name: string }
 interface RootFolder { id: number; path: string; free_space: number }
 ```
@@ -75,11 +95,12 @@ interface RootFolder { id: number; path: string; free_space: number }
 | GET | `/api/runs?limit=50` | | `Run[]`, newest first, without `profile` |
 | GET | `/api/runs/{id}` | | `{run: Run, picks: Pick[]}` |
 | POST | `/api/runs` | `{kind, vibe?, use_taste?}` | `202 Run` (status `running`). `use_taste` defaults to `true`; see "Open search" below. `409` when a run of that kind is already running. `400` when the kind's app or TMDB is not configured, or when `use_taste` is `false` and `vibe` is empty |
-| GET | `/api/picks?kind=&run=latest\|{id}&verdict=none\|accepted\|ignored\|later` | | `Pick[]`, newest run first, then score |
+| GET | `/api/picks?kind=&run=latest\|all\|{id}&verdict=none\|accepted\|ignored\|later&added=true&search=true\|false&distinct=true&limit=&offset=` | | `Pick[]`, newest run first, then score. `run` defaults to `latest`; `all` spans every succeeded run. `added=true` keeps picks whose latest request has status `added`, ordered by `request.requested_at` newest first. `search=true` keeps picks from open-search runs (`use_taste` false), `search=false` from taste runs. `distinct=true` returns one pick per `(tmdb_id, kind)`, the most recent. `limit` defaults to 200 (max 1000), `offset` to 0. The `X-Total-Count` response header is the number of matching picks before `limit`/`offset`. Titles currently in the Radarr/Sonarr library are left out, except picks added through Proposarr (so they still show under Added) |
 | POST | `/api/picks/{id}/verdict` | `{verdict: Verdict \| "", later_days?: number}` | `Pick`. `later_days` defaults to 30. `""` clears the verdict (undo) |
 | GET | `/api/apps/{radarr\|sonarr}/options` | | `{quality_profiles: QualityProfile[], root_folders: RootFolder[], default_root_folder: string}` |
 | POST | `/api/picks/{id}/request` | `{quality_profile_id: number, root_folder?: string}` | `Pick` with `request` and verdict `accepted`. `400` without `quality_profile_id` (there is no default) or when several root folders exist and none was given or configured. `409` when the title is already in the library |
 | GET | `/api/library?kind=` | | `{kind, titles: LibraryTitle[], profile: Profile \| null}` |
+| GET | `/api/titles/{movies\|series}/{tmdb_id}` | | `TitleDetails`. Fetched live from TMDB with credits, videos and watch providers, and ratings from Radarr (movies) or Sonarr (series); cached in memory for 1 hour. `404` when TMDB does not know the id, `400` when TMDB is not configured. A ratings failure only leaves `ratings` absent |
 | GET | `/api/events` | | Server-sent events, see below |
 | GET | `/healthz` | | `200 ok`, plain text. Never requires auth (for container health checks) |
 
@@ -95,6 +116,15 @@ A run normally ranks candidates against the taste profile (`use_taste: true`). W
 - Picks have `source: "free"` and may have an empty `related_to`; `reason` says how the title matches the description.
 - Explicit constraints in the description (decade, country, language, genre) are hard requirements. Claude scores each suggestion on how well it fits the description; suggestions below 70 are dropped, so a search can return fewer picks rather than off-target ones.
 - Ranking uses real ratings, not Claude's estimate. Claude suggests about twice the pick count (at most 50); after verification each remaining pick's rating score is the mean of the available values among IMDb × 10 (only with at least 1,000 votes) and the Rotten Tomatoes critic score. Picks are ordered by that score, the best `picks` are kept, and `score` is the rating score (rounded). A pick without either rating keeps Claude's score and sorts after rated picks.
+
+## Collection
+
+The UI's Collection page is built from `GET /api/picks` across all runs:
+
+- **Added**: `run=all&added=true&distinct=true` — every title added to Sonarr/Radarr through Proposarr, newest request first.
+- **Searches**: `run=all&search=true` — every pick from open-search runs, grouped client-side by `run_id` (with `run_vibe` and `found_at` as the group heading), newest search first. Searches without picks are not shown.
+
+Clicking a title anywhere (Picks, Collection, Library) opens a detail modal fed by `GET /api/titles/{kind}/{tmdb_id}`, combined with the pick (reason, related titles, score, verdict, request) when the title came from a pick.
 
 ## IMDb and Rotten Tomatoes
 

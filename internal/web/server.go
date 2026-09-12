@@ -19,6 +19,7 @@ import (
 	"github.com/leandervdo/proposarr/internal/pipeline"
 	"github.com/leandervdo/proposarr/internal/request"
 	"github.com/leandervdo/proposarr/internal/store"
+	"github.com/leandervdo/proposarr/internal/tmdb"
 )
 
 // Runner runs one recommendation pass (pipeline.Pipeline).
@@ -65,6 +66,12 @@ type Options struct {
 	App        func(app string) (catalog AppCatalog, defaultRootFolder string, ok bool)
 	Library    func(ctx context.Context, kind media.Kind) ([]media.Title, error)
 	Check      func(ctx context.Context) []CheckResult
+	// Title fetches one title's details from TMDB, with streaming providers for
+	// region. An unknown id returns an error wrapping tmdb.ErrNotFound.
+	Title func(ctx context.Context, kind media.Kind, tmdbID int, region string) (tmdb.FullDetails, error)
+	// Ratings looks up a title's real ratings (Radarr/Sonarr). Optional; an
+	// error only leaves the ratings out.
+	Ratings func(ctx context.Context, kind media.Kind, tmdbID int) (*pipeline.Ratings, error)
 
 	UI     fs.FS
 	Logger *slog.Logger
@@ -76,6 +83,7 @@ type Server struct {
 	log    *slog.Logger
 	now    func() time.Time
 	events *hub
+	titles *titleCache
 
 	ctx    context.Context // server lifetime, parent of every run
 	cancel context.CancelFunc
@@ -87,7 +95,8 @@ type Server struct {
 }
 
 func New(o Options) *Server {
-	s := &Server{o: o, log: o.Logger, now: o.Now, events: newHub(), running: map[media.Kind]*activeRun{}}
+	s := &Server{o: o, log: o.Logger, now: o.Now, events: newHub(), titles: newTitleCache(titleCacheTTL, titleCacheSize),
+		running: map[media.Kind]*activeRun{}}
 	if s.log == nil {
 		s.log = slog.New(slog.DiscardHandler)
 	}
@@ -118,6 +127,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/picks/{id}/request", s.requestPick)
 	mux.HandleFunc("GET /api/apps/{app}/options", s.appOptions)
 	mux.HandleFunc("GET /api/library", s.library)
+	mux.HandleFunc("GET /api/titles/{kind}/{tmdb_id}", s.titleDetails)
 	mux.HandleFunc("GET /api/events", s.streamEvents)
 	mux.HandleFunc("/", s.static)
 	return securityHeaders(s.auth(mux))

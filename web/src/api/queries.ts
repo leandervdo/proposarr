@@ -1,6 +1,14 @@
-import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { api, type PicksQuery } from "./client";
-import type { App, Kind, Pick, Service, SettingValues, Verdict } from "./types";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type InfiniteData,
+  type QueryClient,
+} from "@tanstack/react-query";
+import { useCallback, useSyncExternalStore } from "react";
+import { ApiError, api, type PicksPage, type PicksQuery } from "./client";
+import type { App, Kind, Library, LibraryTitle, Pick, Service, SettingValues, Verdict } from "./types";
 
 export const keys = {
   status: ["status"] as const,
@@ -9,9 +17,21 @@ export const keys = {
   runs: ["runs"] as const,
   run: (id: number) => ["runs", id] as const,
   picks: (q: PicksQuery) => ["picks", q] as const,
+  /** Paged pick lists (Collection). Under "picks" so run and verdict updates reach them. */
+  pickPages: (q: Omit<PicksQuery, "offset">) => ["picks", "pages", q] as const,
   library: (kind: Kind) => ["library", kind] as const,
   options: (app: App) => ["options", app] as const,
+  title: (kind: Kind, tmdbId: number) => ["title", kind, tmdbId] as const,
 };
+
+/** What can sit under the "picks" key: a plain list or paged lists. */
+type PicksData = Pick[] | InfiniteData<PicksPage, number>;
+
+function mapPicksData(old: PicksData | undefined, fn: (p: Pick) => Pick): PicksData | undefined {
+  if (!old) return old;
+  if (Array.isArray(old)) return old.map(fn);
+  return { ...old, pages: old.pages.map((page) => ({ ...page, picks: page.picks.map(fn) })) };
+}
 
 export const useStatus = () => useQuery({ queryKey: keys.status, queryFn: api.status, refetchInterval: 60_000 });
 export const useConfig = () => useQuery({ queryKey: keys.config, queryFn: api.config });
@@ -56,8 +76,8 @@ export function useStartRun() {
 
 /** Replaces a pick (and its verdict on other runs' copies of the same title) in every cached list. */
 export function applyPick(qc: QueryClient, pick: Pick) {
-  qc.setQueriesData<Pick[]>({ queryKey: ["picks"] }, (old) =>
-    old?.map((p) =>
+  qc.setQueriesData<PicksData>({ queryKey: ["picks"] }, (old) =>
+    mapPicksData(old, (p) =>
       p.id === pick.id
         ? pick
         : p.tmdb_id === pick.tmdb_id && p.kind === pick.kind
@@ -91,6 +111,76 @@ export function useRequestPick() {
     onSuccess: (pick) => {
       applyPick(qc, pick);
       void qc.invalidateQueries({ queryKey: ["library"] });
+      // A new request joins the Collection's Added list; the title is now in the library.
+      void qc.invalidateQueries({ queryKey: ["picks", "pages"] });
+      void qc.invalidateQueries({ queryKey: keys.title(pick.kind, pick.tmdb_id) });
     },
   });
+}
+
+const PAGE_SIZE = 200;
+
+/** Picks in pages of 200, for "Load more". */
+export function usePickPages(q: Omit<PicksQuery, "offset" | "limit">) {
+  return useInfiniteQuery({
+    queryKey: keys.pickPages({ ...q, limit: PAGE_SIZE }),
+    queryFn: ({ pageParam }) => api.picksPage({ ...q, limit: PAGE_SIZE, offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (last) => {
+      const next = last.offset + last.picks.length;
+      return last.picks.length > 0 && next < last.total ? next : undefined;
+    },
+  });
+}
+
+/** Details for the title modal. The server caches TMDB for an hour, so this can stay fresh for a while. */
+export const useTitleDetails = (kind: Kind | undefined, tmdbId: number | undefined) =>
+  useQuery({
+    queryKey: keys.title(kind ?? "movies", tmdbId ?? 0),
+    queryFn: () => api.title(kind!, tmdbId!),
+    enabled: kind !== undefined && tmdbId !== undefined,
+    staleTime: 10 * 60_000,
+    retry: (count, err) => !(err instanceof ApiError && err.status >= 400 && err.status < 500) && count < 1,
+  });
+
+function findCachedPick(qc: QueryClient, id: number): Pick | undefined {
+  for (const [, data] of qc.getQueriesData<PicksData>({ queryKey: ["picks"] })) {
+    if (!data) continue;
+    const lists = Array.isArray(data) ? [data] : data.pages.map((page) => page.picks);
+    for (const list of lists) {
+      const found = list.find((p) => p.id === id);
+      if (found) return found;
+    }
+  }
+  for (const [, data] of qc.getQueriesData<unknown>({ queryKey: ["runs"] })) {
+    if (data && typeof data === "object" && "picks" in data && Array.isArray(data.picks)) {
+      const found = (data.picks as Pick[]).find((p) => p.id === id);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A pick by id, kept live from whatever list already holds it. A shared link can land before any list is
+ * loaded; then every pick of that kind is fetched once to find it.
+ */
+export function usePick(id: number | undefined, kind: Kind | undefined) {
+  const qc = useQueryClient();
+  const subscribe = useCallback((onChange: () => void) => qc.getQueryCache().subscribe(onChange), [qc]);
+  const snapshot = useCallback(() => (id === undefined ? undefined : findCachedPick(qc, id)), [qc, id]);
+  const cached = useSyncExternalStore(subscribe, snapshot);
+  const fallback = useQuery({
+    queryKey: keys.picks({ kind, run: "all", limit: 1000 }),
+    queryFn: () => api.picks({ kind, run: "all", limit: 1000 }),
+    enabled: id !== undefined && kind !== undefined && !cached,
+  });
+  return { pick: cached, isPending: id !== undefined && !cached && fallback.isPending && fallback.fetchStatus !== "idle" };
+}
+
+/** A library title already in the cache, for the modal's fallback when details fail. */
+export function useCachedLibraryTitle(kind: Kind | undefined, tmdbId: number | undefined): LibraryTitle | undefined {
+  const qc = useQueryClient();
+  if (!kind || tmdbId === undefined) return undefined;
+  return qc.getQueryData<Library>(keys.library(kind))?.titles?.find((t) => t.tmdb_id === tmdbId);
 }

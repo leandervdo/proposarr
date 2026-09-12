@@ -1,8 +1,11 @@
 // In-memory backend for `VITE_MOCK=1 pnpm dev`. Add ?scenario=empty|down|unconfigured to the URL
-// to see the empty, unreachable and not-configured screens.
+// to see the empty, unreachable and not-configured screens, or ?scenario=many for enough open-search
+// picks to page through the Collection. GET /api/titles/movies/17431 (Moon) fails on purpose, to show
+// the modal without TMDB details.
 import { ratingScore } from "@/lib/ratings";
 import { ApiError } from "./client";
 import type { LiveEvent } from "./events";
+import { titleSeeds } from "./mockTitles";
 import type {
   AppConfig,
   AppOptions,
@@ -19,10 +22,11 @@ import type {
   Settings,
   Status,
   TestResult,
+  TitleDetails,
   Verdict,
 } from "./types";
 
-type Scenario = "default" | "empty" | "down" | "unconfigured" | "setup";
+type Scenario = "default" | "empty" | "down" | "unconfigured" | "setup" | "many";
 
 const scenario: Scenario = (() => {
   try {
@@ -42,7 +46,8 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ---------- fixtures ----------
 
-type PickSeed = Omit<Pick, "id" | "run_id" | "kind">;
+// Run fields (run_vibe, run_use_taste, found_at) are filled in when a seed joins a run.
+type PickSeed = Omit<Pick, "id" | "run_id" | "kind" | "run_vibe" | "run_use_taste" | "found_at">;
 
 const moviePicks: PickSeed[] = [
   {
@@ -146,7 +151,7 @@ const seriesPicks: PickSeed[] = [
     genres: ["Drama", "War & Politics"], rating: 8.6, streaming: ["Disney+"], poster_url: `${IMG}/7O4iVfOMQmdCSxhOg1WnzG1AgYT.jpg`,
   },
   {
-    tmdb_id: 90660, imdb_id: "tt10574236", title: "Station Eleven", year: 2021, score: 87, source: "free",
+    tmdb_id: 90972, imdb_id: "tt10574236", title: "Station Eleven", year: 2021, score: 87, source: "free",
     ratings: { imdb: { value: 7.5, votes: 47_806 } },
     reason: "A hopeful, finished post-pandemic story that shares The Leftovers' interest in grief.",
     related_to: ["The Leftovers (2014)"], overview: "A post-apocalyptic saga spanning multiple timelines, telling the stories of survivors of a devastating flu as they attempt to rebuild and reimagine the world anew.",
@@ -248,11 +253,50 @@ const searchSeeds: Record<Kind, SearchSeed[]> = {
   ],
 };
 
+// An older movie search, for a second group on the Collection page.
+const whodunitSeeds: SearchSeed[] = [
+  {
+    tmdb_id: 546554, imdb_id: "tt8946378", title: "Knives Out", year: 2019,
+    reason: "A famous family, a dead patriarch and a detective who unpicks everyone's alibi in one big room.",
+    related_to: [], overview: "When renowned crime novelist Harlan Thrombey is found dead at his estate just after his 85th birthday, the inquisitive and debonair Detective Benoit Blanc is mysteriously enlisted to investigate.",
+    genres: ["Comedy", "Crime", "Mystery"], rating: 7.8, streaming: ["Prime Video"],
+    ratings: { imdb: { value: 7.9, votes: 812_550 }, rotten_tomatoes: 97, metacritic: 82 },
+  },
+  {
+    tmdb_id: 661374, imdb_id: "tt11564570", title: "Glass Onion: A Knives Out Mystery", year: 2022,
+    reason: "A private island, a tech billionaire's murder game and a cast that all have a motive.",
+    related_to: ["Knives Out (2019)"], overview: "World-famous detective Benoit Blanc heads to Greece to peel back the layers of a mystery surrounding a tech billionaire and his eclectic crew of friends.",
+    genres: ["Comedy", "Crime", "Mystery"], rating: 7.0, streaming: ["Netflix"],
+    ratings: { imdb: { value: 7.1, votes: 512_330 }, rotten_tomatoes: 92, metacritic: 81 },
+  },
+  {
+    tmdb_id: 5279, imdb_id: "tt0280707", title: "Gosford Park", year: 2001,
+    reason: "An upstairs-downstairs country house weekend where the murder is almost a footnote to the gossip.",
+    related_to: [], overview: "Multiple perspectives are used to show what transpires before and after a murder at an English country estate.",
+    genres: ["Mystery", "Drama", "Comedy"], rating: 6.9, streaming: [],
+    ratings: { imdb: { value: 7.2, votes: 192_014 }, rotten_tomatoes: 87, metacritic: 90 },
+  },
+  {
+    tmdb_id: 392044, imdb_id: "tt3402236", title: "Murder on the Orient Express", year: 2017,
+    reason: "Thirteen strangers snowed in on a train, with Poirot sorting out who is lying.",
+    related_to: [], overview: "Genius Belgian detective Hercule Poirot investigates the murder of an American tycoon aboard the Orient Express train.",
+    genres: ["Crime", "Drama", "Mystery"], rating: 6.7, streaming: ["Disney+"],
+    ratings: { imdb: { value: 6.5, votes: 341_120 }, rotten_tomatoes: 60, metacritic: 52 },
+  },
+];
+
 /** Scores and orders search seeds the way the server does for an open search. */
-function searchPicks(kind: Kind): PickSeed[] {
-  return searchSeeds[kind]
+function searchPicks(kind: Kind, seeds: SearchSeed[] = searchSeeds[kind]): PickSeed[] {
+  return seeds
     .map((s) => ({ ...s, source: "free" as const, score: Math.round(ratingScore(s.ratings) ?? 55) }))
     .sort((a, b) => b.score - a.score);
+}
+
+/** Moon keeps no poster and no details, to show both fallbacks. */
+const BROKEN_TITLE = 17431;
+
+function seedFor(kind: Kind, tmdbId: number) {
+  return titleSeeds.find((t) => t.kind === kind && t.tmdb_id === tmdbId);
 }
 
 const runs: Run[] = [];
@@ -273,18 +317,71 @@ function makeRun(kind: Kind, over: Partial<Run>): Run {
 function addPicks(run: Run, seeds: PickSeed[]) {
   for (const s of seeds) {
     const id = nextPickId++;
-    picks.push({ ...s, id, run_id: run.id, kind: run.kind, request: s.request ? { ...s.request, pick_id: id } : undefined });
+    const poster = s.tmdb_id === BROKEN_TITLE ? undefined : seedFor(run.kind, s.tmdb_id)?.poster;
+    picks.push({
+      ...s,
+      id,
+      run_id: run.id,
+      run_vibe: run.vibe,
+      run_use_taste: run.use_taste,
+      found_at: run.started_at,
+      kind: run.kind,
+      poster_url: s.poster_url ?? (poster ? `${IMG}${poster}` : undefined),
+      request: s.request ? { ...s.request, pick_id: id } : undefined,
+    });
   }
   run.pick_count = seeds.length;
 }
 
-if (scenario === "default") {
+/** Marks a seeded pick as added to Radarr/Sonarr at a given time, like POST /api/picks/{id}/request. */
+function markAdded(run: Run, tmdbId: number, minutesAgo: number, qualityProfile: string, rootFolder?: string) {
+  const pick = picks.find((p) => p.run_id === run.id && p.tmdb_id === tmdbId);
+  if (!pick) return;
+  const app = run.kind === "series" ? "sonarr" : "radarr";
+  setVerdictFor(pick, "accepted");
+  for (const p of picks.filter((p) => p.tmdb_id === tmdbId && p.kind === run.kind)) p.verdict_at = ago(minutesAgo);
+  pick.request = {
+    pick_id: pick.id, app, target_id: 700 + pick.id, quality_profile: qualityProfile,
+    root_folder: rootFolder ?? (app === "sonarr" ? "/media/series" : "/media/movies"), status: "added", requested_at: ago(minutesAgo),
+  };
+}
+
+function markVerdict(run: Run, tmdbId: number, verdict: Verdict, minutesAgo: number) {
+  const pick = picks.find((p) => p.run_id === run.id && p.tmdb_id === tmdbId);
+  if (!pick) return;
+  setVerdictFor(pick, verdict);
+  for (const p of picks.filter((p) => p.tmdb_id === tmdbId && p.kind === run.kind)) p.verdict_at = ago(minutesAgo);
+}
+
+if (scenario === "default" || scenario === "many") {
+  // Created oldest first, so run ids follow time the way the server's do.
+  if (scenario === "many") {
+    // 30 older searches of 8 picks each: more than one page of 200.
+    for (let i = 29; i >= 0; i--) {
+      const extra = makeRun("movies", {
+        use_taste: false, vibe: `heist movies, batch ${30 - i}`, started_at: ago(60 * 24 * (40 + i)), finished_at: ago(60 * 24 * (40 + i) - 2),
+        history_count: 0, candidate_count: 0,
+      });
+      addPicks(extra, searchPicks("movies"));
+      runs.push(extra);
+    }
+  }
+  const whodunits = makeRun("movies", {
+    use_taste: false, vibe: "cosy whodunits with a big cast", started_at: ago(60 * 24 * 16), finished_at: ago(60 * 24 * 16 - 2),
+    cost_usd: 0.0811, input_tokens: 12_904, output_tokens: 2_310, history_count: 0, candidate_count: 0,
+  });
+  addPicks(whodunits, searchPicks("movies", whodunitSeeds));
   const r1 = makeRun("movies", { started_at: ago(60 * 24 * 9), finished_at: ago(60 * 24 * 9 - 3), vibe: "something to watch with my parents", cost_usd: 0.1511 });
   addPicks(r1, moviePicks.slice(6).map((p) => ({ ...p, verdict: undefined, request: undefined })));
   const r2 = makeRun("series", {
     status: "failed", started_at: ago(60 * 24 * 4), finished_at: ago(60 * 24 * 4 - 1), cost_usd: 0, input_tokens: 0, output_tokens: 0, num_turns: 0,
     error: "TMDB: GET /3/tv/95396/recommendations: HTTP 401: Invalid API key: You must be granted a valid key.", candidate_count: 0,
   });
+  const seriesSearch = makeRun("series", {
+    use_taste: false, vibe: "short Korean thrillers", started_at: ago(60 * 24 * 2), finished_at: ago(60 * 24 * 2 - 2),
+    cost_usd: 0.0702, input_tokens: 11_230, output_tokens: 1_980, history_count: 0, candidate_count: 0,
+  });
+  addPicks(seriesSearch, searchPicks("series"));
   const r3 = makeRun("movies", {
     status: "rate_limited", started_at: ago(60 * 26), finished_at: ago(60 * 26 - 1), cost_usd: 0, input_tokens: 0, output_tokens: 0, num_turns: 1,
     error: "claude session limit: You've hit your session limit · resets 11pm",
@@ -313,7 +410,18 @@ if (scenario === "default") {
     ],
   });
   addPicks(r5, moviePicks);
-  runs.push(r1, r2, r3, r4, search, r5);
+  runs.push(whodunits, r1, r2, seriesSearch, r3, r4, search, r5);
+
+  // Requests on different dates, from taste runs and searches.
+  markAdded(whodunits, 546554, 60 * 24 * 15, "HD Bluray + WEB");
+  markVerdict(whodunits, 661374, "later", 60 * 24 * 14);
+  markVerdict(whodunits, 392044, "ignored", 60 * 24 * 15);
+  markAdded(r1, 152601, 60 * 24 * 8, "Remux + WEB 1080p");
+  markAdded(search, 629, 60 * 2 + 40, "Remux + WEB 2160p");
+  markVerdict(search, 500, "later", 60 * 2 + 30);
+  markVerdict(search, 1844, "ignored", 60 * 2 + 20);
+  markAdded(seriesSearch, 70593, 60 * 24 + 90, "Remux + WEB 1080p", "/media/series");
+  markVerdict(seriesSearch, 99966, "ignored", 60 * 24 + 80);
   // A series run in progress when the page loads.
   startMockRun("series", "prestige drama I can finish in a month", 45_000);
 }
@@ -486,10 +594,10 @@ function put(key: string, over: Partial<SettingField>) {
 }
 
 if (scenario !== "setup") {
-  put("radarr.url", { value: "http://192.168.1.238:7878", source: "ui" });
+  put("radarr.url", { value: "http://192.168.1.10:7878", source: "ui" });
   put("radarr.api_key", { source: "default", hint: "read from initialize.json" });
-  put("sonarr.url", { value: "http://192.168.1.238:8989", source: "env", locked: true });
-  put("plex.url", { value: "http://192.168.1.238:32400", source: "ui" });
+  put("sonarr.url", { value: "http://192.168.1.10:8989", source: "env", locked: true });
+  put("plex.url", { value: "http://192.168.1.10:32400", source: "ui" });
   put("plex.token", { source: "ui" });
   put("tmdb.api_key", { source: "file", locked: true });
   put("tmdb.region", { value: "NL", source: "ui" });
@@ -628,7 +736,46 @@ function setVerdictFor(pick: Pick, verdict: Verdict | "", laterDays?: number) {
   }
 }
 
-export async function mockFetch(method: string, path: string, body?: unknown): Promise<unknown> {
+const PROVIDERS = ["Netflix", "Max", "Prime Video", "Disney+", "Apple TV+", "SkyShowtime", "Videoland"];
+
+/** Every pick seed, for the ratings and IMDb ids TMDB details carry too. */
+function pickSeedFor(kind: Kind, tmdbId: number) {
+  const all = kind === "series" ? [...seriesPicks, ...searchSeeds.series] : [...moviePicks, ...searchSeeds.movies, ...whodunitSeeds];
+  return all.find((s) => s.tmdb_id === tmdbId);
+}
+
+function titleDetails(kind: Kind, tmdbId: number): TitleDetails {
+  const seed = seedFor(kind, tmdbId);
+  if (!seed) throw new ApiError(404, `TMDB does not know ${kind === "series" ? "tv" : "movie"} ${tmdbId}`);
+  const pickSeed = pickSeedFor(kind, tmdbId);
+  const library = kind === "series" ? librarySeries : libraryMovies;
+  const hash = (tmdbId * 7919) % 997;
+  const pickPoster = picks.find((p) => p.kind === kind && p.tmdb_id === tmdbId)?.poster_url;
+  return {
+    tmdb_id: tmdbId, kind, title: seed.title, year: seed.year, tagline: seed.tagline, overview: seed.overview ?? pickSeed?.overview,
+    genres: seed.genres, runtime: seed.runtime, release_date: seed.release_date ?? (seed.year ? `${seed.year}-01-01` : undefined), status: seed.status,
+    seasons: seed.seasons, episodes: seed.episodes,
+    poster_url: pickPoster ?? (seed.poster ? `${IMG}${seed.poster}` : undefined),
+    backdrop_url: seed.backdrop ? `https://image.tmdb.org/t/p/w1280${seed.backdrop}` : undefined,
+    directors: seed.directors,
+    cast: seed.cast.map(([name, character, profile]) => ({
+      name, character: character || undefined, profile_url: profile ? `https://image.tmdb.org/t/p/w185${profile}` : undefined,
+    })),
+    trailer: seed.trailer ? { name: "Official Trailer", youtube_key: seed.trailer } : undefined,
+    streaming: pickSeed?.streaming ?? PROVIDERS.filter((_, i) => (hash >> i) % 3 === 0).slice(0, 2),
+    imdb_id: pickSeed?.imdb_id, tmdb_rating: seed.tmdb_rating, tmdb_votes: seed.tmdb_rating ? 2_000 + hash * 37 : undefined,
+    ratings: pickSeed?.ratings,
+    in_library: library.some((t) => t.tmdb_id === tmdbId) || picks.some((p) => p.kind === kind && p.tmdb_id === tmdbId && p.request?.status === "added"),
+  };
+}
+
+export async function mockFetch(method: string, path: string, body?: unknown): Promise<{ data: unknown; headers: Headers }> {
+  const headers = new Headers();
+  const data = await route(method, path, body, headers);
+  return { data, headers };
+}
+
+async function route(method: string, path: string, body: unknown, headers: Headers): Promise<unknown> {
   await wait(method === "POST" ? 450 : 220);
   if (scenario === "down") throw new ApiError(0, "Proposarr is not reachable. Check that `proposarr serve` is running.");
   const url = new URL(path, "http://mock");
@@ -677,7 +824,7 @@ export async function mockFetch(method: string, path: string, body?: unknown): P
       { name: "Radarr", status: "ok", detail: "6.3.0.10514" },
       { name: "Sonarr", status: "ok", detail: "4.0.19.2979" },
       { name: "TMDB", status: "ok", detail: "" },
-      { name: "Plex", status: "fail", detail: "GET /identity: dial tcp 192.168.1.238:32400: i/o timeout" },
+      { name: "Plex", status: "fail", detail: "GET /identity: dial tcp 192.168.1.10:32400: i/o timeout" },
       { name: "Jellyfin", status: "skip", detail: "not configured" },
       { name: "claude", status: "ok", detail: "2.1.268 (Claude Code)" },
       { name: "Claude auth", status: "ok", detail: "via local claude login" },
@@ -686,9 +833,9 @@ export async function mockFetch(method: string, path: string, body?: unknown): P
   if (method === "GET" && url.pathname === "/api/config") {
     return {
       listen: ":8585", data_dir: "/config/data", history_days: 180, snapshot_ttl: "6h0m0s",
-      radarr: { url: configured ? "http://192.168.1.238:7878" : "", api_key_set: false, root_folder: "", minimum_availability: "released" },
-      sonarr: { url: configured ? "http://192.168.1.238:8989" : "", api_key_set: false, root_folder: "" },
-      plex: { url: configured ? "http://192.168.1.238:32400" : "", token_set: configured },
+      radarr: { url: configured ? "http://192.168.1.10:7878" : "", api_key_set: false, root_folder: "", minimum_availability: "released" },
+      sonarr: { url: configured ? "http://192.168.1.10:8989" : "", api_key_set: false, root_folder: "" },
+      plex: { url: configured ? "http://192.168.1.10:32400" : "", token_set: configured },
       jellyfin: { url: "", api_key_set: false, user_id: "" },
       tmdb: { api_key_set: configured, region: "NL" },
       claude: { bin: "claude", auth: "local", timeout: "10m0s", max_budget_usd: 0 },
@@ -715,16 +862,51 @@ export async function mockFetch(method: string, path: string, body?: unknown): P
     const kind = q.get("kind") as Kind | null;
     const runParam = q.get("run");
     const verdict = q.get("verdict");
+    const runsById = new Map(runs.map((r) => [r.id, r]));
     let list = picks.filter((p) => !kind || p.kind === kind);
-    if (runParam === "latest") {
+    if (runParam === "all") {
+      list = list.filter((p) => runsById.get(p.run_id)?.status === "succeeded");
+    } else if (runParam === "latest" || !runParam) {
       const ids = new Set((["movies", "series"] as Kind[]).map((k) => latestSucceeded(k)?.id));
       list = list.filter((p) => ids.has(p.run_id));
-    } else if (runParam) {
+    } else {
       list = list.filter((p) => p.run_id === Number(runParam));
     }
     if (verdict === "none") list = list.filter((p) => !p.verdict);
     else if (verdict) list = list.filter((p) => p.verdict === verdict);
-    return list.sort((a, b) => b.run_id - a.run_id || b.score - a.score).map((p) => ({ ...p }));
+    const search = q.get("search");
+    if (search === "true") list = list.filter((p) => runsById.get(p.run_id)?.use_taste === false);
+    else if (search === "false") list = list.filter((p) => runsById.get(p.run_id)?.use_taste !== false);
+    if (q.get("added") === "true") {
+      list = list
+        .filter((p) => p.request?.status === "added")
+        .sort((a, b) => b.request!.requested_at.localeCompare(a.request!.requested_at) || b.run_id - a.run_id);
+    } else {
+      list.sort((a, b) => b.run_id - a.run_id || b.score - a.score);
+    }
+    if (q.get("distinct") === "true") {
+      const seen = new Set<string>();
+      list = list.filter((p) => {
+        const key = `${p.kind}:${p.tmdb_id}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+    const limit = Math.min(Math.max(Number(q.get("limit") ?? 200) || 200, 1), 1000);
+    const offset = Math.max(Number(q.get("offset") ?? 0) || 0, 0);
+    headers.set("X-Total-Count", String(list.length));
+    return list.slice(offset, offset + limit).map((p) => ({ ...p }));
+  }
+  if (method === "GET" && parts[1] === "titles" && parts.length === 4) {
+    const kind = parts[2];
+    if (kind !== "movies" && kind !== "series") throw new ApiError(404, `mock: no route for ${method} ${path}`);
+    if (!configured) throw new ApiError(400, "TMDB is not configured: set tmdb.api_key");
+    await wait(350);
+    if (kind === "movies" && Number(parts[3]) === BROKEN_TITLE) {
+      throw new ApiError(500, "TMDB: GET /3/movie/17431: context deadline exceeded");
+    }
+    return titleDetails(kind, Number(parts[3]));
   }
   if (parts[1] === "picks" && parts[3] === "verdict" && method === "POST") {
     const pick = picks.find((p) => p.id === Number(parts[2]));

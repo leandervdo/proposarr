@@ -42,6 +42,30 @@ export function shortDate(iso?: string): string {
   return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }
 
+/** "11 Sep", with the year when it is not this year: "3 Mar 2025". */
+export function dateLabel(iso?: string, now = new Date()): string {
+  const d = knownDate(iso);
+  if (!d) return "";
+  return d.toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "short",
+    year: d.getFullYear() === now.getFullYear() ? undefined : "numeric",
+  });
+}
+
+/** 127 → "2h 7m"; 45 → "45m". */
+export function runtimeLabel(minutes?: number): string {
+  if (!minutes || minutes <= 0) return "";
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h === 0) return `${m}m`;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+export function plural(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
 export function duration(startIso?: string, endIso?: string, now = Date.now()): string {
   const start = knownDate(startIso);
   if (!start) return "";

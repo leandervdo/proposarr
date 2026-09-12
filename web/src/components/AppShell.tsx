@@ -1,4 +1,4 @@
-import { Cable, History, Library, Moon, Popcorn, SlidersHorizontal, Sun } from "lucide-react";
+import { Cable, GalleryVerticalEnd, History, Library, Moon, Popcorn, SlidersHorizontal, Sun } from "lucide-react";
 import { useEffect } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { toast, Toaster } from "sonner";
@@ -10,10 +10,12 @@ import { useTheme } from "@/lib/theme";
 import { useTick } from "@/lib/useTick";
 import { cn } from "@/lib/utils";
 import { BackendDown } from "./EmptyState";
+import { TitleModal } from "./TitleModal";
 import { Tooltip } from "./ui/tooltip";
 
 const NAV = [
   { to: "/", label: "Picks", icon: Popcorn, end: true },
+  { to: "/collection", label: "Collection", icon: GalleryVerticalEnd },
   { to: "/runs", label: "Runs", icon: History },
   { to: "/library", label: "Library", icon: Library },
   { to: "/connections", label: "Connections", icon: Cable },
@@ -104,7 +106,7 @@ export function AppShell() {
       {/* Mobile bottom navigation */}
       <nav
         aria-label="Main"
-        className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-border bg-background/90 pb-[env(safe-area-inset-bottom)] backdrop-blur-lg lg:hidden"
+        className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-6 border-t border-border bg-background/90 pb-[env(safe-area-inset-bottom)] backdrop-blur-lg lg:hidden"
       >
         {NAV.map(({ to, label, icon: Icon, end }) => (
           <NavLink
@@ -112,18 +114,23 @@ export function AppShell() {
             to={to}
             end={end}
             className={({ isActive }) =>
-              cn("flex h-16 flex-col items-center justify-center gap-1 text-[11px] font-medium", isActive ? "text-text" : "text-text-muted")
+              cn(
+                "flex h-16 min-w-0 flex-col items-center justify-center gap-1 px-0.5 text-[10.5px] font-medium tracking-tight",
+                isActive ? "text-text" : "text-text-muted",
+              )
             }
           >
             {({ isActive }) => (
               <>
                 <Icon className={cn("size-5", isActive && "text-accent")} strokeWidth={isActive ? 2.25 : 1.75} />
-                {label}
+                <span className="max-w-full truncate">{label}</span>
               </>
             )}
           </NavLink>
         ))}
       </nav>
+
+      <TitleModal />
 
       <Toaster
         theme={theme}

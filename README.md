@@ -63,7 +63,7 @@ The listen address, data directory, `claude` binary path and web login can only 
 | `PROPOSARR_DATA_DIR` | `data` | Snapshot cache, SQLite database and run data |
 | `PROPOSARR_SECRET_KEY` | | Key for secrets saved from the UI: base64 or hex of 32 bytes, or any passphrase. When unset, a random key is created once in `<data dir>/secret.key`; keep that file with the database |
 | `PROPOSARR_HISTORY_DAYS` | `180` | Watch-history window |
-| `PROPOSARR_SNAPSHOT_TTL` | `6h` | Library snapshot lifetime |
+| `PROPOSARR_SNAPSHOT_TTL` | `10m` | How long the UI caches the library list. Runs always fetch a fresh list |
 | `PROPOSARR_SONARR_URL`, `PROPOSARR_SONARR_API_KEY` | | URL required for series. API key optional, see below |
 | `PROPOSARR_SONARR_ROOT_FOLDER` | | Optional default root folder |
 | `PROPOSARR_RADARR_URL`, `PROPOSARR_RADARR_API_KEY` | | URL required for movies. API key optional, see below |
@@ -106,7 +106,7 @@ Every command accepts `--config PATH`. `run` prints the picks to stdout, or the 
 
 ### Web UI and API
 
-`proposarr serve` starts the web UI and the HTTP API on one port (`PROPOSARR_LISTEN`, default `:8585`; `--listen` overrides it). Runs, picks, verdicts and requests are stored in `proposarr.db` under the data directory. Start a run, accept, ignore or postpone picks, and add accepted picks to Sonarr or Radarr from the browser; adding asks for a quality profile for that title, just like the CLI. Titles you accepted, ignored, postponed or added are left out of later runs. Turn off **Use my taste** to run an open search instead. Every pick links to its IMDb page and shows its IMDb and Rotten Tomatoes ratings when Radarr or Sonarr know them.
+`proposarr serve` starts the web UI and the HTTP API on one port (`PROPOSARR_LISTEN`, default `:8585`; `--listen` overrides it). Runs, picks, verdicts and requests are stored in `proposarr.db` under the data directory. Start a run, accept, ignore or postpone picks, and add accepted picks to Sonarr or Radarr from the browser; adding asks for a quality profile for that title, just like the CLI. Titles you accepted, ignored, postponed or added are left out of later runs. Turn off **Use my taste** to run an open search instead. Every pick links to its IMDb page and shows its IMDb and Rotten Tomatoes ratings when Radarr or Sonarr know them. The **Collection** page lists every title added through Proposarr and every open search with its picks. Click a title anywhere (Picks, Collection, Library) to open its details: tagline, runtime, cast, trailer, streaming providers and ratings, fetched live from TMDB and cached for an hour.
 
 The UI has no login by default. Set `PROPOSARR_WEB_USERNAME` and `PROPOSARR_WEB_PASSWORD` to require HTTP Basic auth, especially if anyone else can reach the port: the UI can add titles to Sonarr and Radarr and start Claude runs. `/healthz` stays open for container health checks.
 

@@ -129,6 +129,22 @@ func TestOldCacheVersionRefetches(t *testing.T) {
 	}
 }
 
+func TestInvalidateRefetches(t *testing.T) {
+	dir := t.TempDir()
+	src := &fakeMovies{titles: []media.Title{{TMDBID: 1, Title: "Arrival"}}}
+	lib := &Library{Dir: dir, TTL: time.Hour, Radarr: src}
+	if _, err := lib.Titles(context.Background(), media.Movies); err != nil {
+		t.Fatal(err)
+	}
+	src.titles = append(src.titles, media.Title{TMDBID: 9693, Title: "Children of Men"})
+	lib.Invalidate(media.Movies)
+	got, err := lib.Titles(context.Background(), media.Movies)
+	if err != nil || src.calls != 2 || len(got) != 2 {
+		t.Fatalf("calls=%d got=%+v err=%v, want a refetch with the new title", src.calls, got, err)
+	}
+	(&Library{}).Invalidate(media.Movies) // no cache dir: no-op
+}
+
 func TestSeriesTVDBResolutionCached(t *testing.T) {
 	dir := t.TempDir()
 	src := &fakeSeries{titles: []media.Title{

@@ -130,6 +130,10 @@ func TestZeroConfigServeRequiresSetup(t *testing.T) {
 	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "tmdb.api_key") {
 		t.Fatalf("run without settings: %d %s", rec.Code, rec.Body.String())
 	}
+	rec = serveHTTP(h, "GET", "/api/titles/movies/603", "")
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "tmdb.api_key") {
+		t.Fatalf("title details without settings: %d %s", rec.Code, rec.Body.String())
+	}
 	rec = serveHTTP(h, "GET", "/api/settings", "")
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"radarr.url":{"value":"","secret":false,"set":false,"source":"default"`) {
 		t.Fatalf("settings: %d %s", rec.Code, rec.Body.String())

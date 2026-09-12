@@ -94,6 +94,14 @@ func (l *Library) Titles(ctx context.Context, kind media.Kind) ([]media.Title, e
 	return titles, nil
 }
 
+// Invalidate drops the cached snapshot for kind, so the next Titles call
+// refetches it, e.g. right after a title was added.
+func (l *Library) Invalidate(kind media.Kind) {
+	if p := l.path(kind); p != "" {
+		_ = os.Remove(p)
+	}
+}
+
 func (l *Library) path(kind media.Kind) string {
 	if l.Dir == "" {
 		return ""

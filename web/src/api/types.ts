@@ -51,6 +51,12 @@ export interface Request {
 export interface Pick {
   id: number;
   run_id: number;
+  /** The run's description. */
+  run_vibe?: string;
+  /** false when the pick came from an open search. */
+  run_use_taste: boolean;
+  /** The run's started_at. */
+  found_at: string;
   tmdb_id: number;
   imdb_id?: string;
   kind: Kind;
@@ -118,6 +124,46 @@ export interface Library {
   kind: Kind;
   titles: LibraryTitle[] | null;
   profile: Profile | null;
+}
+
+export interface CastMember {
+  name: string;
+  character?: string;
+  profile_url?: string;
+}
+
+/** Everything about one title, fetched live from TMDB (plus ratings from Radarr/Sonarr). */
+export interface TitleDetails {
+  tmdb_id: number;
+  kind: Kind;
+  title: string;
+  year?: number;
+  tagline?: string;
+  overview?: string;
+  genres: string[] | null;
+  /** Minutes; the typical episode length for series. */
+  runtime?: number;
+  /** Movies: release date; series: first air date (YYYY-MM-DD). */
+  release_date?: string;
+  /** e.g. "Released", "Returning Series", "Ended". */
+  status?: string;
+  seasons?: number;
+  episodes?: number;
+  poster_url?: string;
+  /** w1280 */
+  backdrop_url?: string;
+  /** Movies: directors; series: creators. */
+  directors: string[] | null;
+  /** Top 12 billed. */
+  cast: CastMember[] | null;
+  trailer?: { name: string; youtube_key: string };
+  /** Flatrate providers in the configured region. */
+  streaming: string[] | null;
+  imdb_id?: string;
+  tmdb_rating?: number;
+  tmdb_votes?: number;
+  ratings?: Ratings;
+  in_library: boolean;
 }
 
 export interface QualityProfile {

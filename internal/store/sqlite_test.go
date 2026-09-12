@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -321,6 +322,192 @@ func TestListPicksFilters(t *testing.T) {
 		})
 	}
 	_ = run2
+}
+
+// storedRun creates a run and finishes it with the given picks and error.
+func storedRun(t *testing.T, s *SQLite, r Run, runErr error, picks ...pipeline.Pick) int64 {
+	t.Helper()
+	id, err := s.CreateRun(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishRun(ctx, id, &pipeline.Run{Kind: r.Kind, Picks: picks}, runErr); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+type pickCase struct {
+	name  string
+	f     PickFilter
+	want  []string
+	total int
+}
+
+func checkPickCases(t *testing.T, s *SQLite, cases []pickCase) {
+	t.Helper()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := s.ListPicks(ctx, tc.f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(titles(got), tc.want) {
+				t.Errorf("got %v, want %v", titles(got), tc.want)
+			}
+			if n, err := s.CountPicks(ctx, tc.f); err != nil || n != tc.total {
+				t.Errorf("CountPicks = %d, %v, want %d", n, err, tc.total)
+			}
+		})
+	}
+}
+
+func TestListPicksCollection(t *testing.T) {
+	s, _ := openTest(t)
+	t0 := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	day := 24 * time.Hour
+	taste1 := storedRun(t, s, Run{Kind: media.Movies, UseTaste: true, StartedAt: t0}, nil, pick(1, 90, "a1"), pick(2, 80, "b1"))
+	search1 := storedRun(t, s, Run{Kind: media.Movies, Vibe: "heists", StartedAt: t0.Add(day)}, nil, pick(1, 70, "a2"), pick(3, 60, "c2"))
+	storedRun(t, s, Run{Kind: media.Movies, Vibe: "failed search", StartedAt: t0.Add(2 * day)}, errors.New("boom"), pick(4, 99, "d3"))
+	storedRun(t, s, Run{Kind: media.Series, Vibe: "korean thrillers", StartedAt: t0.Add(3 * day)}, nil, pick(1, 50, "e4"))
+	storedRun(t, s, Run{Kind: media.Movies, UseTaste: true, StartedAt: t0.Add(4 * day)}, nil, pick(3, 30, "c5a"), pick(3, 20, "c5b"), pick(2, 10, "b5"))
+
+	yes, no := true, false
+	all := []string{"c5a", "c5b", "b5", "e4", "a2", "c2", "a1", "b1"}
+	checkPickCases(t, s, []pickCase{
+		{"all succeeded runs", PickFilter{AllRuns: true}, all, 8},
+		{"all overrides run id", PickFilter{AllRuns: true, RunID: search1}, all, 8},
+		{"latest overrides all", PickFilter{Kind: media.Movies, LatestRun: true, AllRuns: true}, []string{"c5a", "c5b", "b5"}, 3},
+		{"open searches", PickFilter{AllRuns: true, Search: &yes}, []string{"e4", "a2", "c2"}, 3},
+		{"open searches of any status", PickFilter{Search: &yes}, []string{"e4", "d3", "a2", "c2"}, 4},
+		{"taste runs", PickFilter{AllRuns: true, Search: &no}, []string{"c5a", "c5b", "b5", "a1", "b1"}, 5},
+		{"distinct keeps the most recent", PickFilter{AllRuns: true, Distinct: true}, []string{"c5b", "b5", "e4", "a2"}, 4},
+		{"distinct applies after the filters", PickFilter{AllRuns: true, Search: &yes, Distinct: true}, []string{"e4", "a2", "c2"}, 3},
+		{"distinct per kind", PickFilter{Kind: media.Series, AllRuns: true, Distinct: true}, []string{"e4"}, 1},
+		{"limit and offset", PickFilter{AllRuns: true, Limit: 3, Offset: 2}, []string{"b5", "e4", "a2"}, 8},
+		{"offset past the end", PickFilter{AllRuns: true, Offset: 8}, []string{}, 8},
+		{"negative offset", PickFilter{AllRuns: true, Limit: 1, Offset: -3}, []string{"c5a"}, 8},
+		{"limit above the maximum", PickFilter{AllRuns: true, Limit: 5000}, all, 8},
+	})
+
+	checkRunFields := func(where string, p Pick, vibe string, useTaste bool, found time.Time) {
+		t.Helper()
+		if p.RunVibe != vibe || p.RunUseTaste != useTaste || !p.FoundAt.Equal(found) {
+			t.Errorf("%s: %s run_vibe %q use_taste %v found_at %v", where, p.Title, p.RunVibe, p.RunUseTaste, p.FoundAt)
+		}
+	}
+	_, searchPicks, err := s.GetRun(ctx, search1)
+	if err != nil || len(searchPicks) != 2 {
+		t.Fatalf("GetRun = %+v, %v", searchPicks, err)
+	}
+	checkRunFields("GetRun", searchPicks[0], "heists", false, t0.Add(day))
+	p, err := s.GetPick(ctx, searchPicks[1].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkRunFields("GetPick", p, "heists", false, t0.Add(day))
+	listed, err := s.ListPicks(ctx, PickFilter{RunID: taste1})
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("ListPicks = %+v, %v", listed, err)
+	}
+	checkRunFields("ListPicks", listed[0], "", true, t0)
+
+	for _, tc := range []struct {
+		p    Pick
+		want map[string]any
+	}{
+		{listed[0], map[string]any{"run_use_taste": true, "found_at": "2026-09-01T10:00:00Z"}},
+		{p, map[string]any{"run_vibe": "heists", "run_use_taste": false, "found_at": "2026-09-02T10:00:00Z"}},
+	} {
+		b, err := json.Marshal(tc.p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range tc.want {
+			if m[k] != v {
+				t.Errorf("%s: %s = %v, want %v", tc.p.Title, k, m[k], v)
+			}
+		}
+		if _, ok := m["run_vibe"]; ok != (tc.p.RunVibe != "") {
+			t.Errorf("%s: run_vibe present = %v", tc.p.Title, ok)
+		}
+	}
+}
+
+func TestListPicksAdded(t *testing.T) {
+	s, _ := openTest(t)
+	t0 := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	run1 := storedRun(t, s, Run{Kind: media.Movies, UseTaste: true, StartedAt: t0}, nil,
+		pick(10, 90, "added early"), pick(11, 80, "added late"), pick(12, 70, "failed"), pick(13, 60, "added then failed"))
+	run2 := storedRun(t, s, Run{Kind: media.Movies, UseTaste: true, StartedAt: t0.Add(time.Hour)}, nil,
+		pick(10, 50, "picked again"), pick(14, 40, "failed then added"))
+	storedRun(t, s, Run{Kind: media.Series, UseTaste: true, StartedAt: t0.Add(2 * time.Hour)}, nil, pick(20, 90, "series unrequested"))
+
+	ids := map[string]int64{}
+	for _, run := range []int64{run1, run2} {
+		_, ps, err := s.GetRun(ctx, run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range ps {
+			ids[p.Title] = p.ID
+		}
+	}
+	for _, r := range []Request{
+		{PickID: ids["added early"], Status: "added", RequestedAt: t0.Add(1 * time.Minute)},
+		{PickID: ids["added late"], Status: "added", RequestedAt: t0.Add(3 * time.Minute)},
+		{PickID: ids["failed"], Status: "failed", Error: "timeout", RequestedAt: t0.Add(2 * time.Minute)},
+		{PickID: ids["added then failed"], Status: "added", RequestedAt: t0},
+		{PickID: ids["added then failed"], Status: "failed", RequestedAt: t0.Add(4 * time.Minute)},
+		{PickID: ids["failed then added"], Status: "failed", RequestedAt: t0},
+		{PickID: ids["failed then added"], Status: "added", RequestedAt: t0.Add(2 * time.Minute)},
+	} {
+		r.App = "radarr"
+		if err := s.RecordRequest(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	added := []string{"added late", "failed then added", "added early"}
+	checkPickCases(t, s, []pickCase{
+		{"newest request first", PickFilter{AllRuns: true, Added: true}, added, 3},
+		{"distinct keeps the added pick", PickFilter{AllRuns: true, Added: true, Distinct: true}, added, 3},
+		{"limit and offset", PickFilter{AllRuns: true, Added: true, Limit: 1, Offset: 1}, []string{"failed then added"}, 3},
+		{"latest run only", PickFilter{Kind: media.Movies, LatestRun: true, Added: true}, []string{"failed then added"}, 1},
+		{"series", PickFilter{Kind: media.Series, AllRuns: true, Added: true}, []string{}, 0},
+	})
+}
+
+// Titles that are in the library now are never shown as picks, unless
+// Proposarr added them itself (they belong under Added).
+func TestListPicksExcludesLibrary(t *testing.T) {
+	s, _ := openTest(t)
+	t0 := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	run := storedRun(t, s, Run{Kind: media.Movies, StartedAt: t0}, nil,
+		pick(10, 90, "added in radarr directly"), pick(11, 80, "not in library"), pick(12, 70, "added through proposarr"))
+	_, ps, err := s.GetRun(ctx, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range ps {
+		if p.Title == "added through proposarr" {
+			if err := s.RecordRequest(ctx, Request{PickID: p.ID, App: "radarr", Status: "added", RequestedAt: t0}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	owned := []int{10, 12}
+	checkPickCases(t, s, []pickCase{
+		{"no library filter", PickFilter{AllRuns: true}, []string{"added in radarr directly", "not in library", "added through proposarr"}, 3},
+		{"library titles left out", PickFilter{AllRuns: true, ExcludeTMDB: owned}, []string{"not in library", "added through proposarr"}, 2},
+		{"added tab keeps own adds", PickFilter{AllRuns: true, Added: true, ExcludeTMDB: owned}, []string{"added through proposarr"}, 1},
+		{"undecided hides owned", PickFilter{LatestRun: true, Verdict: new(Verdict), ExcludeTMDB: owned}, []string{"not in library", "added through proposarr"}, 2},
+	})
 }
 
 func TestSetVerdict(t *testing.T) {
